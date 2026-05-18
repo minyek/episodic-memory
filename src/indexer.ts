@@ -159,6 +159,7 @@ export async function indexConversations(
     // Now process embeddings and DB inserts (fast, sequential is fine)
     for (const conv of toProcess) {
       for (const exchange of conv.exchanges) {
+        if (exchange.isSidechain) continue;
         const toolNames = exchange.toolCalls?.map(tc => tc.toolName);
         const embedding = await generateExchangeEmbedding(
           exchange.userMessage,
@@ -169,7 +170,7 @@ export async function indexConversations(
         insertExchange(db, exchange, embedding, toolNames);
       }
 
-      totalExchanges += conv.exchanges.length;
+      totalExchanges += conv.exchanges.filter(e => !e.isSidechain).length;
       conversationsProcessed++;
 
       // Check if we hit the limit
@@ -248,6 +249,7 @@ export async function indexSession(sessionId: string, concurrency: number = 1, n
 
         // Index
         for (const exchange of exchanges) {
+          if (exchange.isSidechain) continue;
           const toolNames = exchange.toolCalls?.map(tc => tc.toolName);
           const embedding = await generateExchangeEmbedding(
             exchange.userMessage,
@@ -378,6 +380,7 @@ export async function indexUnprocessed(concurrency: number = 1, noSummaries: boo
   console.log(`\nIndexing embeddings...`);
   for (const conv of unprocessed) {
     for (const exchange of conv.exchanges) {
+      if (exchange.isSidechain) continue;
       const toolNames = exchange.toolCalls?.map(tc => tc.toolName);
       const embedding = await generateExchangeEmbedding(
         exchange.userMessage,

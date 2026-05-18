@@ -118,11 +118,13 @@ export async function indexConversations(limitToProject, maxConversations, concu
             // Now process embeddings and DB inserts (fast, sequential is fine)
             for (const conv of toProcess) {
                 for (const exchange of conv.exchanges) {
+                    if (exchange.isSidechain)
+                        continue;
                     const toolNames = exchange.toolCalls?.map(tc => tc.toolName);
                     const embedding = await generateExchangeEmbedding(exchange.userMessage, exchange.assistantMessage, toolNames);
                     insertExchange(db, exchange, embedding, toolNames);
                 }
-                totalExchanges += conv.exchanges.length;
+                totalExchanges += conv.exchanges.filter(e => !e.isSidechain).length;
                 conversationsProcessed++;
                 // Check if we hit the limit
                 if (maxConversations && conversationsProcessed >= maxConversations) {
@@ -191,6 +193,8 @@ export async function indexSession(sessionId, concurrency = 1, noSummaries = fal
                     }
                     // Index
                     for (const exchange of exchanges) {
+                        if (exchange.isSidechain)
+                            continue;
                         const toolNames = exchange.toolCalls?.map(tc => tc.toolName);
                         const embedding = await generateExchangeEmbedding(exchange.userMessage, exchange.assistantMessage, toolNames);
                         insertExchange(db, exchange, embedding, toolNames);
@@ -295,6 +299,8 @@ export async function indexUnprocessed(concurrency = 1, noSummaries = false) {
     console.log(`\nIndexing embeddings...`);
     for (const conv of unprocessed) {
         for (const exchange of conv.exchanges) {
+            if (exchange.isSidechain)
+                continue;
             const toolNames = exchange.toolCalls?.map(tc => tc.toolName);
             const embedding = await generateExchangeEmbedding(exchange.userMessage, exchange.assistantMessage, toolNames);
             insertExchange(db, exchange, embedding, toolNames);
