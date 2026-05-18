@@ -18,6 +18,53 @@ function shouldSkipConversation(filePath) {
         return false;
     }
 }
+/**
+ * Peek at the first ~8KB of a JSONL file and return whether the conversation
+ * is a sidechain. A file is "sidechain" when the first record carrying an
+ * isSidechain field has it set to true — subagent dispatches (every record),
+ * Warmup stubs, prompt-suggestion sidechains, ai-title stubs, etc.
+ *
+ * Conservative: if we can't read the file, can't parse a record, or no record
+ * within the first 8KB carries the field, return false so the file is copied.
+ * Mixed-content sessions (regular session with some sidechain records inline)
+ * also return false — the indexer-side filter handles per-exchange skipping.
+ */
+export function isSidechainFile(filePath) {
+    let fd = null;
+    try {
+        fd = fs.openSync(filePath, 'r');
+        const buffer = Buffer.alloc(8192);
+        const bytesRead = fs.readSync(fd, buffer, 0, 8192, 0);
+        const text = buffer.toString('utf-8', 0, bytesRead);
+        for (const line of text.split('\n')) {
+            if (!line)
+                continue;
+            let parsed;
+            try {
+                parsed = JSON.parse(line);
+            }
+            catch {
+                // Line truncated by 8KB read or malformed — stop scanning.
+                return false;
+            }
+            if (typeof parsed?.isSidechain === 'boolean') {
+                return parsed.isSidechain;
+            }
+        }
+        return false;
+    }
+    catch {
+        return false;
+    }
+    finally {
+        if (fd !== null) {
+            try {
+                fs.closeSync(fd);
+            }
+            catch { }
+        }
+    }
+}
 function copyIfNewer(src, dest) {
     // Ensure destination directory exists
     const destDir = path.dirname(dest);
@@ -81,6 +128,10 @@ export async function syncConversations(sourceDir, destDir, options = {}) {
             const srcFile = path.join(projectPath, file);
             const destFile = path.join(destDir, project, file);
             try {
+                if (isSidechainFile(srcFile)) {
+                    result.skipped++;
+                    continue;
+                }
                 const wasCopied = copyIfNewer(srcFile, destFile);
                 if (wasCopied) {
                     result.copied++;

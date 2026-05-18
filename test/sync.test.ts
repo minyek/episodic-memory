@@ -21,12 +21,18 @@ describe('sync command', () => {
     // Create source directory
     mkdirSync(sourceDir, { recursive: true });
 
+    // Isolate from the user's real exclude.txt / config so subagents/ dirs
+    // aren't pre-filtered at discovery.
+    process.env.EPISODIC_MEMORY_CONFIG_DIR = join(testDir, 'config');
+    mkdirSync(process.env.EPISODIC_MEMORY_CONFIG_DIR, { recursive: true });
+
     // Set DB path for sync to use
     process.env.TEST_DB_PATH = dbPath;
   });
 
   afterEach(() => {
     delete process.env.TEST_DB_PATH;
+    delete process.env.EPISODIC_MEMORY_CONFIG_DIR;
     try {
       rmSync(testDir, { recursive: true, force: true });
     } catch (error) {
@@ -246,5 +252,80 @@ describe('sync command', () => {
     const sentinelsAfter2 = readdirSync(join(destDir, 'project-a'))
       .filter(f => f.endsWith('-summary.txt'));
     expect(sentinelsAfter2.length).toBe(zeroExchangeFileCount);
+  });
+
+  it('should not copy sidechain files (top-level Warmup stub)', async () => {
+    mkdirSync(join(sourceDir, 'project-a'), { recursive: true });
+    const sidechainFile = join(sourceDir, 'project-a', 'agent-a01.jsonl');
+    writeFileSync(
+      sidechainFile,
+      JSON.stringify({
+        isSidechain: true,
+        type: 'user',
+        message: { role: 'user', content: 'Warmup' },
+        uuid: 'warmup-1',
+        timestamp: '2026-01-01T00:00:00.000Z',
+      }) + '\n',
+      'utf-8'
+    );
+
+    const result = await syncConversations(sourceDir, destDir, { skipIndex: true, skipSummaries: true });
+
+    expect(result.copied).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(existsSync(join(destDir, 'project-a', 'agent-a01.jsonl'))).toBe(false);
+  });
+
+  it('should not copy sidechain files (nested subagent dispatch)', async () => {
+    mkdirSync(join(sourceDir, 'project-a', 'parent-session', 'subagents'), { recursive: true });
+    const sidechainFile = join(sourceDir, 'project-a', 'parent-session', 'subagents', 'agent-a01.jsonl');
+    writeFileSync(
+      sidechainFile,
+      JSON.stringify({
+        isSidechain: true,
+        type: 'user',
+        cwd: '/test/project',
+        message: { role: 'user', content: 'Investigate the bug' },
+        uuid: 'sub-1',
+        timestamp: '2026-01-01T00:00:00.000Z',
+      }) + '\n' +
+      JSON.stringify({
+        isSidechain: true,
+        type: 'assistant',
+        cwd: '/test/project',
+        message: { role: 'assistant', content: 'Found it in foo.ts' },
+        uuid: 'sub-2',
+        timestamp: '2026-01-01T00:00:01.000Z',
+      }) + '\n',
+      'utf-8'
+    );
+
+    const result = await syncConversations(sourceDir, destDir, { skipIndex: true, skipSummaries: true });
+
+    expect(result.copied).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(existsSync(join(destDir, 'project-a', 'parent-session', 'subagents', 'agent-a01.jsonl'))).toBe(false);
+  });
+
+  it('should copy regular non-sidechain conversation files', async () => {
+    mkdirSync(join(sourceDir, 'project-a'), { recursive: true });
+    const regularFile = join(sourceDir, 'project-a', 'session-1.jsonl');
+    writeFileSync(
+      regularFile,
+      JSON.stringify({
+        isSidechain: false,
+        type: 'user',
+        cwd: '/test/project',
+        message: { role: 'user', content: 'Hello' },
+        uuid: 'reg-1',
+        timestamp: '2026-01-01T00:00:00.000Z',
+      }) + '\n',
+      'utf-8'
+    );
+
+    const result = await syncConversations(sourceDir, destDir, { skipIndex: true, skipSummaries: true });
+
+    expect(result.copied).toBe(1);
+    expect(existsSync(join(destDir, 'project-a', 'session-1.jsonl'))).toBe(true);
   });
 });
