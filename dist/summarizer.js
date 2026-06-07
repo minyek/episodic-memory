@@ -6,16 +6,11 @@ import { spawn } from 'child_process';
 import { createInterface } from 'readline';
 import { codexVersionRequirementMessage, parseCodexCliVersion, versionMeetsMinimum, } from './codex-support.js';
 /**
- * Thrown by callClaude when the SDK yields an `is_error: true` result message.
- * Carries the SDK's `subtype`, `session_id`, the HTTP `api_error_status`, and the
- * `result` error text as typed fields so callers can dispatch on structural
- * metadata and logs show the real failure rather than a bare subtype.
- *
- * `subtype: 'success'` with `is_error: true` is a documented SDK combination
- * (`SDKResultSuccess`): the agent loop finished but the turn hit an API error,
- * with the message in `result` and the status in `api_error_status`. Surfacing
- * both turns the otherwise-useless "Summarizer SDK error: success" into a
- * diagnostic line.
+ * Thrown by callClaude on an `is_error: true` result. Carries `subtype`,
+ * `session_id`, `api_error_status`, and the error text so callers can dispatch
+ * on structure and logs show the real failure, not a bare subtype. The SDK
+ * pairs `subtype: 'success'` with `is_error: true` when the loop finished but
+ * the turn hit an API error (carried in `result` / `api_error_status`).
  */
 export class SummarizerSdkError extends Error {
     subtype;
@@ -39,18 +34,13 @@ export class SummarizerSdkError extends Error {
     }
 }
 /**
- * True when the failure was caused by the resume continuation itself — the
- * trigger for the non-resume fallback in summarizeConversation. Two signals:
- *
- * - subtype `error_during_execution`: the SDK couldn't resume the session
- *   (e.g. the recorded cwd no longer exists, or "No conversation found").
- * - an HTTP 400 on the result: the API rejected the *replayed history*. The
- *   canonical case is `thinking`/`redacted_thinking` blocks in the latest
- *   assistant turn, which the API forbids modifying when continuing. Our
- *   summary prompt is plain, well-formed text, so on a resume call a 400 can
- *   only come from the replayed turns — exactly what the non-resume path (fresh
- *   session, transcript as text) sidesteps. Other statuses (401/403/429/5xx)
- *   are not resume-specific, so they propagate rather than burn a futile retry.
+ * True when the resume continuation itself failed — the trigger for the
+ * non-resume fallback in summarizeConversation. Two signals:
+ * - `error_during_execution`: the SDK couldn't resume (e.g. recorded cwd gone).
+ * - HTTP 400: the API rejected the replayed history, canonically `thinking`
+ *   blocks it forbids modifying on continuation. Our prompt is plain text, so a
+ *   400 on resume can only come from the replayed turns. Other statuses aren't
+ *   resume-specific and propagate.
  */
 export function isResumeFailure(error) {
     if (!(error instanceof SummarizerSdkError))
@@ -65,7 +55,6 @@ export function isResumeFailure(error) {
  *
  * Env vars (all optional):
  * - EPISODIC_MEMORY_API_MODEL: Model to use (default: haiku)
- * - EPISODIC_MEMORY_API_MODEL_FALLBACK: Fallback model on error (default: sonnet)
  * - EPISODIC_MEMORY_API_BASE_URL: Custom API endpoint
  * - EPISODIC_MEMORY_API_TOKEN: Auth token for custom endpoint
  * - EPISODIC_MEMORY_API_TIMEOUT_MS: Timeout for API calls (default: SDK default)
@@ -122,7 +111,10 @@ export function buildSummarizerQueryOptions(args) {
     const { model, sessionId, cwd } = args;
     return {
         model,
-        max_tokens: 4096,
+        // Let the model self-budget its thinking. This overrides any fixed budget
+        // inherited from the resumed session, which can be invalid for the
+        // (smaller) summarizer model and rejected with a thinking.budget_tokens 400.
+        thinking: { type: 'adaptive' },
         env: getApiEnv(),
         resume: sessionId,
         persistSession: false,
@@ -169,32 +161,18 @@ export function buildCodexSummarizerCommand(args) {
         model: args.model,
     };
 }
-async function callClaude(prompt, sessionId, useFallback = false, cwd) {
-    const primaryModel = process.env.EPISODIC_MEMORY_API_MODEL || 'haiku';
-    const fallbackModel = process.env.EPISODIC_MEMORY_API_MODEL_FALLBACK || 'sonnet';
-    const model = useFallback ? fallbackModel : primaryModel;
+async function callClaude(prompt, sessionId, cwd) {
+    const model = process.env.EPISODIC_MEMORY_API_MODEL || 'haiku';
     for await (const message of query({
         prompt,
         options: buildSummarizerQueryOptions({ model, sessionId, cwd }),
     })) {
         if (message && typeof message === 'object' && 'type' in message && message.type === 'result') {
             const result = message.result;
-            const isError = message.is_error;
-            const apiErrorStatus = message.api_error_status;
-            // The thinking.budget_tokens error is checked BEFORE the is_error throw:
-            // the SDK may report it as either a plain result string or an is_error
-            // result, and the model-fallback retry must run in both cases. (Resume on
-            // the same session, fallback model — distinct from the non-resume fallback
-            // in summarizeConversation.)
-            if (typeof result === 'string' && result.includes('API Error') && result.includes('thinking.budget_tokens') && !useFallback) {
-                console.log(`    ${primaryModel} hit thinking budget error, retrying with ${fallbackModel}`);
-                return await callClaude(prompt, sessionId, true, cwd);
-            }
-            // Throw on is_error, carrying the real API error text + status so the log
-            // is diagnostic and summarizeConversation can route a 400 (immutable
-            // thinking blocks on resume) to the non-resume fallback.
-            if (isError) {
-                throw new SummarizerSdkError(message.subtype || 'unknown', message.session_id, apiErrorStatus, typeof result === 'string' ? result : undefined);
+            // Carry the API error text + status so logs are diagnostic and
+            // summarizeConversation can route a 400 to the non-resume fallback.
+            if (message.is_error) {
+                throw new SummarizerSdkError(message.subtype || 'unknown', message.session_id, message.api_error_status, typeof result === 'string' ? result : undefined);
             }
             return result;
         }
@@ -482,7 +460,7 @@ Bad:
 
 ${conversationText}`;
         try {
-            const result = await callClaude(prompt, claudeSessionId, false, cwd);
+            const result = await callClaude(prompt, claudeSessionId, cwd);
             return extractSummary(result);
         }
         catch (error) {

@@ -1,15 +1,10 @@
 import { ConversationExchange } from './types.js';
 /**
- * Thrown by callClaude when the SDK yields an `is_error: true` result message.
- * Carries the SDK's `subtype`, `session_id`, the HTTP `api_error_status`, and the
- * `result` error text as typed fields so callers can dispatch on structural
- * metadata and logs show the real failure rather than a bare subtype.
- *
- * `subtype: 'success'` with `is_error: true` is a documented SDK combination
- * (`SDKResultSuccess`): the agent loop finished but the turn hit an API error,
- * with the message in `result` and the status in `api_error_status`. Surfacing
- * both turns the otherwise-useless "Summarizer SDK error: success" into a
- * diagnostic line.
+ * Thrown by callClaude on an `is_error: true` result. Carries `subtype`,
+ * `session_id`, `api_error_status`, and the error text so callers can dispatch
+ * on structure and logs show the real failure, not a bare subtype. The SDK
+ * pairs `subtype: 'success'` with `is_error: true` when the loop finished but
+ * the turn hit an API error (carried in `result` / `api_error_status`).
  */
 export declare class SummarizerSdkError extends Error {
     readonly subtype: string;
@@ -19,18 +14,13 @@ export declare class SummarizerSdkError extends Error {
     constructor(subtype: string, sessionId?: string | undefined, apiErrorStatus?: number | null | undefined, apiError?: string | undefined);
 }
 /**
- * True when the failure was caused by the resume continuation itself — the
- * trigger for the non-resume fallback in summarizeConversation. Two signals:
- *
- * - subtype `error_during_execution`: the SDK couldn't resume the session
- *   (e.g. the recorded cwd no longer exists, or "No conversation found").
- * - an HTTP 400 on the result: the API rejected the *replayed history*. The
- *   canonical case is `thinking`/`redacted_thinking` blocks in the latest
- *   assistant turn, which the API forbids modifying when continuing. Our
- *   summary prompt is plain, well-formed text, so on a resume call a 400 can
- *   only come from the replayed turns — exactly what the non-resume path (fresh
- *   session, transcript as text) sidesteps. Other statuses (401/403/429/5xx)
- *   are not resume-specific, so they propagate rather than burn a futile retry.
+ * True when the resume continuation itself failed — the trigger for the
+ * non-resume fallback in summarizeConversation. Two signals:
+ * - `error_during_execution`: the SDK couldn't resume (e.g. recorded cwd gone).
+ * - HTTP 400: the API rejected the replayed history, canonically `thinking`
+ *   blocks it forbids modifying on continuation. Our prompt is plain text, so a
+ *   400 on resume can only come from the replayed turns. Other statuses aren't
+ *   resume-specific and propagate.
  */
 export declare function isResumeFailure(error: unknown): boolean;
 export interface CodexSummarizerCommand {
@@ -48,7 +38,6 @@ export interface CodexSummarizerCommand {
  *
  * Env vars (all optional):
  * - EPISODIC_MEMORY_API_MODEL: Model to use (default: haiku)
- * - EPISODIC_MEMORY_API_MODEL_FALLBACK: Fallback model on error (default: sonnet)
  * - EPISODIC_MEMORY_API_BASE_URL: Custom API endpoint
  * - EPISODIC_MEMORY_API_TOKEN: Auth token for custom endpoint
  * - EPISODIC_MEMORY_API_TIMEOUT_MS: Timeout for API calls (default: SDK default)

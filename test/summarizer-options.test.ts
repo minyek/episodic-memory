@@ -21,10 +21,13 @@ describe('buildSummarizerQueryOptions', () => {
     expect(opts.persistSession).toBe(false);
   });
 
-  it('passes through the model and max_tokens', () => {
+  it('passes the model through and sets adaptive thinking instead of a fixed budget', () => {
     const opts = buildSummarizerQueryOptions({ model: 'haiku' });
     expect(opts.model).toBe('haiku');
-    expect(opts.max_tokens).toBe(4096);
+    // Adaptive lets each model self-budget, sidestepping the thinking.budget_tokens
+    // 400 a fixed/inherited budget can trigger on the summarizer model.
+    expect(opts.thinking).toEqual({ type: 'adaptive' });
+    expect(opts.max_tokens).toBeUndefined();
   });
 
   it('includes a systemPrompt on fresh sessions', () => {
@@ -77,9 +80,7 @@ describe('isResumeFailure', () => {
   });
 
   it('matches an is_error result carrying HTTP 400 — the API rejecting the replayed thinking blocks on resume', () => {
-    // subtype is 'success' (the agent loop finished) but the turn hit a 400:
-    // `thinking`/`redacted_thinking` blocks in the latest assistant message
-    // cannot be modified. The non-resume path sidesteps the replayed history.
+    // 'success' subtype but the turn hit a 400 — the thinking-block rejection.
     const thinkingBlock400 = new SummarizerSdkError(
       'success',
       'abc-123',
@@ -90,8 +91,7 @@ describe('isResumeFailure', () => {
   });
 
   it('does not match non-400 HTTP statuses — auth/rate-limit/server errors are not resume-specific', () => {
-    // Retrying without resume would not help these, so they must propagate
-    // rather than burn a second API call + transcript re-parse.
+    // Retrying without resume wouldn't help these, so they propagate.
     expect(isResumeFailure(new SummarizerSdkError('success', 'abc-123', 401, 'API Error: 401'))).toBe(false);
     expect(isResumeFailure(new SummarizerSdkError('success', 'abc-123', 429, 'API Error: 429'))).toBe(false);
     expect(isResumeFailure(new SummarizerSdkError('success', 'abc-123', 529, 'API Error: 529'))).toBe(false);
