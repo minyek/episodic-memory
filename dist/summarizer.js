@@ -7,25 +7,57 @@ import { createInterface } from 'readline';
 import { codexVersionRequirementMessage, parseCodexCliVersion, versionMeetsMinimum, } from './codex-support.js';
 /**
  * Thrown by callClaude when the SDK yields an `is_error: true` result message.
- * Carries the SDK's `subtype` and `session_id` as typed fields so callers can
- * dispatch on structural metadata rather than parsing error message text.
+ * Carries the SDK's `subtype`, `session_id`, the HTTP `api_error_status`, and the
+ * `result` error text as typed fields so callers can dispatch on structural
+ * metadata and logs show the real failure rather than a bare subtype.
+ *
+ * `subtype: 'success'` with `is_error: true` is a documented SDK combination
+ * (`SDKResultSuccess`): the agent loop finished but the turn hit an API error,
+ * with the message in `result` and the status in `api_error_status`. Surfacing
+ * both turns the otherwise-useless "Summarizer SDK error: success" into a
+ * diagnostic line.
  */
 export class SummarizerSdkError extends Error {
     subtype;
     sessionId;
-    constructor(subtype, sessionId) {
-        super(`Summarizer SDK error: ${subtype}${sessionId ? ` (session ${sessionId})` : ''}`);
+    apiErrorStatus;
+    apiError;
+    constructor(subtype, sessionId, apiErrorStatus, apiError) {
+        let message = `Summarizer SDK error: ${subtype}`;
+        if (apiErrorStatus != null)
+            message += ` (HTTP ${apiErrorStatus})`;
+        if (sessionId)
+            message += ` (session ${sessionId})`;
+        if (apiError)
+            message += `: ${apiError}`;
+        super(message);
         this.subtype = subtype;
         this.sessionId = sessionId;
+        this.apiErrorStatus = apiErrorStatus;
+        this.apiError = apiError;
         this.name = 'SummarizerSdkError';
     }
 }
 /**
- * True when the SDK's reported failure subtype indicates resume couldn't find
- * the session — the trigger for the non-resume fallback in summarizeConversation.
+ * True when the failure was caused by the resume continuation itself — the
+ * trigger for the non-resume fallback in summarizeConversation. Two signals:
+ *
+ * - subtype `error_during_execution`: the SDK couldn't resume the session
+ *   (e.g. the recorded cwd no longer exists, or "No conversation found").
+ * - an HTTP 400 on the result: the API rejected the *replayed history*. The
+ *   canonical case is `thinking`/`redacted_thinking` blocks in the latest
+ *   assistant turn, which the API forbids modifying when continuing. Our
+ *   summary prompt is plain, well-formed text, so on a resume call a 400 can
+ *   only come from the replayed turns — exactly what the non-resume path (fresh
+ *   session, transcript as text) sidesteps. Other statuses (401/403/429/5xx)
+ *   are not resume-specific, so they propagate rather than burn a futile retry.
  */
 export function isResumeFailure(error) {
-    return error instanceof SummarizerSdkError && error.subtype === 'error_during_execution';
+    if (!(error instanceof SummarizerSdkError))
+        return false;
+    if (error.subtype === 'error_during_execution')
+        return true;
+    return error.apiErrorStatus === 400;
 }
 /**
  * Get API environment overrides for summarization calls.
@@ -146,19 +178,23 @@ async function callClaude(prompt, sessionId, useFallback = false, cwd) {
         options: buildSummarizerQueryOptions({ model, sessionId, cwd }),
     })) {
         if (message && typeof message === 'object' && 'type' in message && message.type === 'result') {
-            // Throw on is_error — otherwise we return `message.result` (undefined) and the SDK's later iterator throw never fires.
-            if (message.is_error) {
-                throw new SummarizerSdkError(message.subtype || 'unknown', message.session_id);
-            }
             const result = message.result;
-            // Check if result is an API error (SDK returns errors as result strings)
-            if (typeof result === 'string' && result.includes('API Error') && result.includes('thinking.budget_tokens')) {
-                if (!useFallback) {
-                    console.log(`    ${primaryModel} hit thinking budget error, retrying with ${fallbackModel}`);
-                    return await callClaude(prompt, sessionId, true, cwd);
-                }
-                // If fallback also fails, return error message
-                return result;
+            const isError = message.is_error;
+            const apiErrorStatus = message.api_error_status;
+            // The thinking.budget_tokens error is checked BEFORE the is_error throw:
+            // the SDK may report it as either a plain result string or an is_error
+            // result, and the model-fallback retry must run in both cases. (Resume on
+            // the same session, fallback model — distinct from the non-resume fallback
+            // in summarizeConversation.)
+            if (typeof result === 'string' && result.includes('API Error') && result.includes('thinking.budget_tokens') && !useFallback) {
+                console.log(`    ${primaryModel} hit thinking budget error, retrying with ${fallbackModel}`);
+                return await callClaude(prompt, sessionId, true, cwd);
+            }
+            // Throw on is_error, carrying the real API error text + status so the log
+            // is diagnostic and summarizeConversation can route a 400 (immutable
+            // thinking blocks on resume) to the non-resume fallback.
+            if (isError) {
+                throw new SummarizerSdkError(message.subtype || 'unknown', message.session_id, apiErrorStatus, typeof result === 'string' ? result : undefined);
             }
             return result;
         }
