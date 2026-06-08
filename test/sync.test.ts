@@ -328,4 +328,52 @@ describe('sync command', () => {
     expect(result.copied).toBe(1);
     expect(existsSync(join(destDir, 'project-a', 'session-1.jsonl'))).toBe(true);
   });
+
+  it('does not index inline sidechain exchanges from a mixed file', async () => {
+    mkdirSync(join(sourceDir, 'project-a'), { recursive: true });
+
+    // A regular session (first record non-sidechain, so the file is copied)
+    // that also carries inline sidechain exchanges — the case the per-exchange
+    // filter must catch on the sync indexing path, not just the manual reindex.
+    const rec = (uuid: string, parent: string | null, role: string, text: string, isSidechain: boolean) =>
+      JSON.stringify({
+        parentUuid: parent,
+        isSidechain,
+        userType: 'external',
+        cwd: '/test/project',
+        sessionId: 'mix-1',
+        version: '2.0.9',
+        gitBranch: 'main',
+        type: role,
+        message:
+          role === 'user'
+            ? { role: 'user', content: text }
+            : { model: 'claude-sonnet-4-5', role: 'assistant', content: [{ type: 'text', text }] },
+        uuid,
+        timestamp: '2026-01-01T00:00:00.000Z',
+      });
+
+    const mixed = [
+      rec('m-u1', null, 'user', 'Real question about the indexer', false),
+      rec('m-a1', 'm-u1', 'assistant', 'Real answer about the indexer', false),
+      rec('m-u2', 'm-a1', 'user', 'Subagent internal step', true),
+      rec('m-a2', 'm-u2', 'assistant', 'Subagent internal finding', true),
+    ].join('\n') + '\n';
+    writeFileSync(join(sourceDir, 'project-a', 'mix-1.jsonl'), mixed, 'utf-8');
+
+    const result = await syncConversations(sourceDir, destDir, { skipSummaries: true });
+
+    // File is copied (its first record is non-sidechain) and indexed...
+    expect(result.copied).toBe(1);
+    expect(result.indexed).toBe(1);
+
+    // ...but only the non-sidechain exchange lands in the DB.
+    const db = new Database(dbPath, { readonly: true });
+    const total = (db.prepare('SELECT COUNT(*) AS c FROM exchanges').get() as { c: number }).c;
+    const sidechain = (db.prepare('SELECT COUNT(*) AS c FROM exchanges WHERE is_sidechain = 1').get() as { c: number }).c;
+    db.close();
+
+    expect(total).toBe(1);
+    expect(sidechain).toBe(0);
+  });
 });

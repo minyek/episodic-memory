@@ -61,29 +61,25 @@ export function isSidechainFile(filePath) {
             try {
                 fs.closeSync(fd);
             }
-            catch { }
+            catch { /* best-effort close */ }
         }
     }
 }
-function copyIfNewer(src, dest) {
+function destIsUpToDate(src, dest) {
+    if (!fs.existsSync(dest))
+        return false;
+    return fs.statSync(dest).mtimeMs >= fs.statSync(src).mtimeMs;
+}
+function copyConversation(src, dest) {
     // Ensure destination directory exists
     const destDir = path.dirname(dest);
     if (!fs.existsSync(destDir)) {
         fs.mkdirSync(destDir, { recursive: true });
     }
-    // Check if destination exists and is up-to-date
-    if (fs.existsSync(dest)) {
-        const srcStat = fs.statSync(src);
-        const destStat = fs.statSync(dest);
-        if (destStat.mtimeMs >= srcStat.mtimeMs) {
-            return false; // Dest is current, skip
-        }
-    }
     // Atomic copy: temp file + rename
     const tempDest = dest + '.tmp.' + process.pid;
     fs.copyFileSync(src, tempDest);
     fs.renameSync(tempDest, dest); // Atomic on same filesystem
-    return true;
 }
 export function extractSessionIdFromPath(filePath) {
     // Extract session ID from Claude filename or Codex rollout filename.
@@ -128,17 +124,20 @@ export async function syncConversations(sourceDir, destDir, options = {}) {
             const srcFile = path.join(projectPath, file);
             const destFile = path.join(destDir, project, file);
             try {
-                if (isSidechainFile(srcFile)) {
+                // Cheap mtime gate first; only peek (an 8KB read) at files we'd
+                // actually copy, so unchanged files aren't re-read on every sync.
+                if (destIsUpToDate(srcFile, destFile)) {
+                    result.skipped++;
+                }
+                else if (isSidechainFile(srcFile)) {
+                    // Sidechain files are never copied, indexed, or summarized.
                     result.skipped++;
                     continue;
                 }
-                const wasCopied = copyIfNewer(srcFile, destFile);
-                if (wasCopied) {
+                else {
+                    copyConversation(srcFile, destFile);
                     result.copied++;
                     filesToIndex.push(destFile);
-                }
-                else {
-                    result.skipped++;
                 }
                 // Check if this file needs a summary (whether newly copied or existing).
                 // shouldQueueForSummary skips files that already have a real summary or
@@ -163,9 +162,10 @@ export async function syncConversations(sourceDir, destDir, options = {}) {
     }
     // Index copied files (unless skipIndex is set)
     if (!options.skipIndex && filesToIndex.length > 0) {
-        const { initDatabase, insertExchange } = await import('./db.js');
-        const { initEmbeddings, generateExchangeEmbedding } = await import('./embeddings.js');
+        const { initDatabase } = await import('./db.js');
+        const { initEmbeddings } = await import('./embeddings.js');
         const { parseConversation } = await import('./parser.js');
+        const { indexExchanges } = await import('./indexer.js');
         const db = initDatabase();
         await initEmbeddings();
         for (const file of filesToIndex) {
@@ -176,11 +176,7 @@ export async function syncConversations(sourceDir, destDir, options = {}) {
                 }
                 const project = path.basename(path.dirname(file));
                 const exchanges = await parseConversation(file, project, file);
-                for (const exchange of exchanges) {
-                    const toolNames = exchange.toolCalls?.map(tc => tc.toolName);
-                    const embedding = await generateExchangeEmbedding(exchange.userMessage, exchange.assistantMessage, toolNames);
-                    insertExchange(db, exchange, embedding, toolNames);
-                }
+                await indexExchanges(db, exchanges);
                 result.indexed++;
             }
             catch (error) {
