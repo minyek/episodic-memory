@@ -23,36 +23,57 @@ function shouldSkipConversation(filePath: string): boolean {
 }
 
 /**
- * Peek at the first ~8KB of a JSONL file and return whether the conversation
- * is a sidechain. A file is "sidechain" when the first record carrying an
- * isSidechain field has it set to true — subagent dispatches (every record),
- * Warmup stubs, prompt-suggestion sidechains, ai-title stubs, etc.
+ * Return whether a JSONL conversation file is a sidechain. A file is
+ * "sidechain" when the first record carrying an isSidechain field has it set to
+ * true — subagent dispatches (every record), Warmup stubs, prompt-suggestion
+ * sidechains, ai-title stubs, etc.
  *
  * Conservative: if we can't read the file, can't parse a record, or no record
- * within the first 8KB carries the field, return false so the file is copied.
+ * carries the field within the scan cap, return false so the file is copied.
  * Mixed-content sessions (regular session with some sidechain records inline)
  * also return false — the indexer-side filter handles per-exchange skipping.
  */
 export function isSidechainFile(filePath: string): boolean {
+  // Read in chunks and parse only complete (newline-terminated) records, so a
+  // first record larger than one chunk — e.g. a big opening prompt with
+  // attachments — is classified rather than truncated. Bounded so a
+  // pathologically large file is never read in full.
+  const CHUNK = 16384;
+  const MAX_BYTES = 1024 * 1024;
   let fd: number | null = null;
   try {
     fd = fs.openSync(filePath, 'r');
-    const buffer = Buffer.alloc(8192);
-    const bytesRead = fs.readSync(fd, buffer, 0, 8192, 0);
-    const text = buffer.toString('utf-8', 0, bytesRead);
+    const chunk = Buffer.alloc(CHUNK);
+    let pending = Buffer.alloc(0);
+    let pos = 0;
 
-    for (const line of text.split('\n')) {
-      if (!line) continue;
-      let parsed: { isSidechain?: unknown } | null;
-      try {
-        parsed = JSON.parse(line);
-      } catch {
-        // Line truncated by 8KB read or malformed — stop scanning.
-        return false;
+    while (pos < MAX_BYTES) {
+      const bytesRead = fs.readSync(fd, chunk, 0, CHUNK, pos);
+      const atEof = bytesRead === 0;
+      if (!atEof) {
+        pos += bytesRead;
+        pending = Buffer.concat([pending, chunk.subarray(0, bytesRead)]);
       }
-      if (typeof parsed?.isSidechain === 'boolean') {
-        return parsed.isSidechain;
+
+      // Parse each complete line; at EOF the trailing bytes are the final line.
+      let nl: number;
+      while ((nl = pending.indexOf(0x0a)) !== -1 || (atEof && pending.length > 0)) {
+        const line = nl !== -1 ? pending.subarray(0, nl) : pending;
+        pending = nl !== -1 ? pending.subarray(nl + 1) : Buffer.alloc(0);
+        if (line.length === 0) continue;
+        let parsed: { isSidechain?: unknown };
+        try {
+          parsed = JSON.parse(line.toString('utf-8'));
+        } catch {
+          // A complete line that won't parse is malformed — stop, copy the file.
+          return false;
+        }
+        if (typeof parsed?.isSidechain === 'boolean') {
+          return parsed.isSidechain;
+        }
       }
+
+      if (atEof) break;
     }
     return false;
   } catch {
@@ -152,8 +173,8 @@ export async function syncConversations(
       const destFile = path.join(destDir, project, file);
 
       try {
-        // Cheap mtime gate first; only peek (an 8KB read) at files we'd
-        // actually copy, so unchanged files aren't re-read on every sync.
+        // Cheap mtime gate first; only peek inside files we'd actually copy,
+        // so unchanged files aren't re-read on every sync.
         if (destIsUpToDate(srcFile, destFile)) {
           result.skipped++;
         } else if (isSidechainFile(srcFile)) {

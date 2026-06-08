@@ -381,4 +381,40 @@ describe('sync command', () => {
     expect(total).toBe(1);
     expect(sidechain).toBe(0);
   });
+
+  it('skips a sidechain file whose first record is larger than the read chunk', async () => {
+    mkdirSync(join(sourceDir, 'project-a'), { recursive: true });
+
+    // A subagent dispatch whose opening record (big prompt + attachments) is
+    // larger than the chunk size — the file-level peek must read the whole
+    // record to see isSidechain rather than truncating and copying it.
+    const bigPrompt = 'x'.repeat(40000);
+    const sidechainFile = join(sourceDir, 'project-a', 'agent-big01.jsonl');
+    writeFileSync(
+      sidechainFile,
+      JSON.stringify({
+        isSidechain: true,
+        type: 'user',
+        cwd: '/test/project',
+        message: { role: 'user', content: bigPrompt },
+        uuid: 'big-1',
+        timestamp: '2026-01-01T00:00:00.000Z',
+      }) + '\n' +
+      JSON.stringify({
+        isSidechain: true,
+        type: 'assistant',
+        cwd: '/test/project',
+        message: { role: 'assistant', content: 'done' },
+        uuid: 'big-2',
+        timestamp: '2026-01-01T00:00:01.000Z',
+      }) + '\n',
+      'utf-8'
+    );
+
+    const result = await syncConversations(sourceDir, destDir, { skipIndex: true, skipSummaries: true });
+
+    expect(result.copied).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(existsSync(join(destDir, 'project-a', 'agent-big01.jsonl'))).toBe(false);
+  });
 });
