@@ -3,7 +3,7 @@ import path from 'path';
 import { StringDecoder } from 'string_decoder';
 import { SUMMARIZER_CONTEXT_MARKER } from './constants.js';
 import { getExcludedProjects, findJsonlFiles, statIfExists } from './paths.js';
-import { formatErrorSentinel, shouldQueueForSummary } from './summary-sentinel.js';
+import { orderFreshBeforeRetry, recordSummaryFailure, recordSummarySkip, shouldQueueForSummary } from './summary-sentinel.js';
 import { getMaxMessageBytes, isOversizeExchange } from './message-size.js';
 
 const EXCLUSION_MARKERS = [
@@ -355,7 +355,7 @@ export async function syncConversations(
     const { summarizeConversation, isAuthFailure } = await import('./summarizer.js');
 
     const summaryLimit = options.summaryLimit ?? 10;
-    const toSummarize = filesToSummarize.slice(0, summaryLimit);
+    const toSummarize = orderFreshBeforeRetry(filesToSummarize).slice(0, summaryLimit);
     const remaining = filesToSummarize.length - toSummarize.length;
 
     console.log(`Generating summaries for ${toSummarize.length} conversation(s)...`);
@@ -363,19 +363,13 @@ export async function syncConversations(
       console.log(`  (${remaining} more need summaries - will process on next sync)`);
     }
 
-    // A global failure (expired Claude CLI OAuth, #138) is not per-file. After
-    // the first, skip the rest of this batch with
-    // error sentinels so we don't burn minutes re-billing doomed calls or spam the
-    // same message per file. The skipped files re-queue on the next sync.
     let stopBatch = false;
     let stopBatchMessage = '';
 
     for (const { path: filePath, sessionId } of toSummarize) {
       if (stopBatch) {
-        try {
-          const summaryPath = filePath.replace('.jsonl', '-summary.txt');
-          fs.writeFileSync(summaryPath, formatErrorSentinel(new Error(stopBatchMessage)), 'utf-8');
-        } catch {}
+        const summaryPath = filePath.replace('.jsonl', '-summary.txt');
+        recordSummarySkip(summaryPath, stopBatchMessage);
         result.errors.push({
           file: filePath,
           error: `Summary generation skipped: ${stopBatchMessage}`,
@@ -401,25 +395,20 @@ export async function syncConversations(
         fs.writeFileSync(summaryPath, summary, 'utf-8');
         result.summarized++;
       } catch (error) {
-        // Write a structured error sentinel (#96): distinct from the empty
-        // zero-exchange sentinel so a stale failure can self-heal on the next
-        // sync run past the retry threshold. The marker also keeps the error
-        // text on disk for post-hoc diagnosis. Best-effort — if the sentinel
-        // write itself fails, fall through and surface the original error.
-        try {
-          const summaryPath = filePath.replace('.jsonl', '-summary.txt');
-          fs.writeFileSync(summaryPath, formatErrorSentinel(error), 'utf-8');
-        } catch {}
+        const summaryPath = filePath.replace('.jsonl', '-summary.txt');
+        const authFailure = isAuthFailure(error);
+        if (authFailure) recordSummarySkip(summaryPath, error);
+        else recordSummaryFailure(summaryPath, error);
         result.errors.push({
           file: filePath,
           error: `Summary generation failed: ${error instanceof Error ? error.message : String(error)}`
         });
 
         // Stop the batch on a global failure (expired auth).
-        if (isAuthFailure(error)) {
+        if (authFailure) {
           stopBatch = true;
           stopBatchMessage =
-            'Claude CLI authentication failed — run `claude` and re-authenticate; summaries will retry on the next sync.';
+            'Claude CLI authentication failed — run `claude` and re-authenticate; summaries will retry after the retry interval.';
           console.error(`  ${stopBatchMessage}`);
         }
       }

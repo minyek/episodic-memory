@@ -77,7 +77,7 @@ async function main() {
 
         if (issues.missing.length > 0) {
           console.log('\nMissing summaries:');
-          issues.missing.forEach(m => console.log(`  ${m.path}`));
+          issues.missing.forEach(m => console.log(`  ${m.path}: ${m.reason}`));
         }
 
         if (issues.missing.length + issues.orphaned.length + issues.outdated.length + issues.corrupted.length > 0) {

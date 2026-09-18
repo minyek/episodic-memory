@@ -3,9 +3,9 @@ import path from 'path';
 import { initDatabase, insertExchange } from './db.js';
 import { parseConversation } from './parser.js';
 import { initEmbeddings, generateExchangeEmbedding } from './embeddings.js';
-import { summarizeConversation } from './summarizer.js';
+import { isAuthFailure, summarizeConversation } from './summarizer.js';
 import { getArchiveDir, getExcludedProjects, getConversationSourceDirs, findJsonlFiles, statIfExists } from './paths.js';
-import { formatErrorSentinel, shouldQueueForSummary } from './summary-sentinel.js';
+import { recordSummaryFailure, recordSummarySkip, shouldQueueForSummary } from './summary-sentinel.js';
 import { getMaxMessageBytes, isOversizeExchange } from './message-size.js';
 // Set max output tokens for Claude SDK (used by summarizer)
 process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = '20000';
@@ -112,11 +112,10 @@ export async function indexConversations(limitToProject, maxConversations, concu
                             return summary;
                         }
                         catch (error) {
-                            // Write an error sentinel so the failure is retryable on a later run (#96).
-                            try {
-                                fs.writeFileSync(conv.summaryPath, formatErrorSentinel(error), 'utf-8');
-                            }
-                            catch { }
+                            if (isAuthFailure(error))
+                                recordSummarySkip(conv.summaryPath, error);
+                            else
+                                recordSummaryFailure(conv.summaryPath, error);
                             console.log(`  ✗ ${conv.file}: ${error}`);
                             return null;
                         }
@@ -209,11 +208,10 @@ export async function indexSession(sessionId, concurrency = 1, noSummaries = fal
                             console.log(`Summary: ${summary.split(/\s+/).length} words`);
                         }
                         catch (error) {
-                            // Write an error sentinel so the failure is retryable on a later run (#96).
-                            try {
-                                fs.writeFileSync(summaryPath, formatErrorSentinel(error), 'utf-8');
-                            }
-                            catch { }
+                            if (isAuthFailure(error))
+                                recordSummarySkip(summaryPath, error);
+                            else
+                                recordSummaryFailure(summaryPath, error);
                             console.log(`Summary failed: ${error instanceof Error ? error.message : String(error)}`);
                         }
                     }
@@ -323,11 +321,10 @@ export async function indexUnprocessed(concurrency = 1, noSummaries = false) {
                     return summary;
                 }
                 catch (error) {
-                    // Write an error sentinel so the failure is retryable on a later run (#96).
-                    try {
-                        fs.writeFileSync(conv.summaryPath, formatErrorSentinel(error), 'utf-8');
-                    }
-                    catch { }
+                    if (isAuthFailure(error))
+                        recordSummarySkip(conv.summaryPath, error);
+                    else
+                        recordSummaryFailure(conv.summaryPath, error);
                     console.log(`  ✗ ${conv.project}/${conv.file}: ${error}`);
                     return null;
                 }

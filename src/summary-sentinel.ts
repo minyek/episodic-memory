@@ -1,76 +1,105 @@
 import * as fs from 'fs';
+import { getSummaryRetryPolicy } from './summary-config.js';
 
-/**
- * Sentinel file format for `<archive>/<project>/<session>-summary.txt`:
- *
- * - File missing → conversation has not been processed; queue for summarization.
- * - File empty → permanent skip (zero-exchange / metadata-only file; #91).
- * - File starts with `__ERRORED__\n` → previous summarization failed.
- *   Skip-then-retry: if mtime is older than the retry threshold, the file is
- *   re-queued; otherwise it's treated as "recently failed, leave alone".
- * - Anything else → real summary content.
- *
- * The error-marker path is what fixes #96: previously a failed summarization
- * wrote no sentinel at all, so the file re-queued every sync run forever and
- * could pin the head of the queue.
- */
 export const ERROR_MARKER = '__ERRORED__';
 const ERROR_MARKER_PREFIX = `${ERROR_MARKER}\n`;
-const DEFAULT_RETRY_MS = 3600_000; // 1 hour
 
-export function formatErrorSentinel(error: unknown): string {
+export interface FailureState {
+  attempts: number;
+  lastAttempt: number;
+}
+
+export function formatErrorSentinel(
+  error: unknown,
+  failure: FailureState = { attempts: 1, lastAttempt: Date.now() },
+): string {
   const message = error instanceof Error ? error.message : String(error);
-  return `${ERROR_MARKER}\n${new Date().toISOString()}\n${message}\n`;
+  return `${ERROR_MARKER}\n${JSON.stringify(failure)}\n${message}\n`;
 }
 
 export function isErroredSentinel(content: string): boolean {
   return content.startsWith(ERROR_MARKER_PREFIX);
 }
 
-function getErrorRetryMs(): number {
-  const raw = process.env.EPISODIC_MEMORY_SUMMARY_ERROR_RETRY_HOURS;
-  if (!raw) return DEFAULT_RETRY_MS;
-  const hours = parseFloat(raw);
-  return Number.isFinite(hours) && hours > 0 ? hours * 3600_000 : DEFAULT_RETRY_MS;
+export function parseErrorSentinel(content: string): FailureState {
+  const secondLine = content.split('\n', 2)[1] ?? '';
+  try {
+    const parsed = JSON.parse(secondLine);
+    if (parsed && Number.isSafeInteger(parsed.attempts) && parsed.attempts >= 0 &&
+        Number.isFinite(parsed.lastAttempt) && parsed.lastAttempt >= 0) {
+      return { attempts: parsed.attempts, lastAttempt: parsed.lastAttempt };
+    }
+  } catch {}
+  const legacyTime = /^\d{4}-\d{2}-\d{2}T/.test(secondLine) ? Date.parse(secondLine) : NaN;
+  return { attempts: 0, lastAttempt: Number.isNaN(legacyTime) ? 0 : legacyTime };
 }
 
-/**
- * True when the sentinel at `summaryPath` represents a real summary —
- * a non-empty file that is not an error marker. Empty zero-exchange
- * sentinels and error sentinels both return false. Use this for callers
- * that care about "is this conversation summarized and useful" (stats,
- * verify, search).
- */
+function readSummary(summaryPath: string): string | undefined {
+  try {
+    return fs.readFileSync(summaryPath, 'utf-8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  }
+}
+
 export function hasRealSummary(summaryPath: string): boolean {
-  if (!fs.existsSync(summaryPath)) return false;
-  let content: string;
   try {
-    content = fs.readFileSync(summaryPath, 'utf-8');
+    const content = readSummary(summaryPath);
+    return !!content && !isErroredSentinel(content);
   } catch {
     return false;
   }
-  if (content.length === 0) return false;
-  if (isErroredSentinel(content)) return false;
-  return true;
 }
 
-/**
- * True when the conversation at `summaryPath` should be (re-)summarized:
- * no sentinel yet, or a stale error marker.
- */
+export function isSummaryRetryExhausted(failure: FailureState): boolean {
+  return failure.attempts >= getSummaryRetryPolicy().maxAttempts;
+}
+
 export function shouldQueueForSummary(summaryPath: string): boolean {
-  if (!fs.existsSync(summaryPath)) return true;
-  let content: string;
   try {
-    content = fs.readFileSync(summaryPath, 'utf-8');
+    const content = readSummary(summaryPath);
+    if (content === undefined) return true;
+    if (!isErroredSentinel(content)) return false;
+    const failure = parseErrorSentinel(content);
+    return !isSummaryRetryExhausted(failure) &&
+      Date.now() - failure.lastAttempt >= getSummaryRetryPolicy().retryMs;
   } catch {
     return false;
   }
-  if (!isErroredSentinel(content)) return false;
+}
+
+function recordSummaryAttempt(summaryPath: string, error: unknown, failedAttempts: number): void {
   try {
-    const stat = fs.statSync(summaryPath);
-    return Date.now() - stat.mtimeMs >= getErrorRetryMs();
-  } catch {
-    return false;
+    const content = readSummary(summaryPath);
+    if (content !== undefined && !isErroredSentinel(content)) return;
+    const attempts = (content ? parseErrorSentinel(content).attempts : 0) + failedAttempts;
+    fs.writeFileSync(summaryPath, formatErrorSentinel(error, { attempts, lastAttempt: Date.now() }), 'utf-8');
+  } catch {}
+}
+
+export function recordSummaryFailure(summaryPath: string, error: unknown): void {
+  recordSummaryAttempt(summaryPath, error, 1);
+}
+
+export function recordSummarySkip(summaryPath: string, error: unknown): void {
+  recordSummaryAttempt(summaryPath, error, 0);
+}
+
+export function orderFreshBeforeRetry<T extends { path: string }>(files: T[]): T[] {
+  const fresh: T[] = [];
+  const retries: T[] = [];
+  for (const file of files) {
+    try {
+      const content = readSummary(file.path.replace('.jsonl', '-summary.txt'));
+      if (content === undefined || (isErroredSentinel(content) && parseErrorSentinel(content).attempts === 0)) {
+        fresh.push(file);
+      } else {
+        retries.push(file);
+      }
+    } catch {
+      retries.push(file);
+    }
   }
+  return [...fresh, ...retries];
 }

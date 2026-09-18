@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync, statSync, utimesSync } from 'fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync, utimesSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 
@@ -16,7 +16,7 @@ vi.mock('../src/summarizer.js', async () => {
 
 import { syncConversations } from '../src/sync.js';
 import { summarizeConversation } from '../src/summarizer.js';
-import { ERROR_MARKER, isErroredSentinel, shouldQueueForSummary, formatErrorSentinel } from '../src/summary-sentinel.js';
+import { ERROR_MARKER, isErroredSentinel, shouldQueueForSummary, formatErrorSentinel, parseErrorSentinel } from '../src/summary-sentinel.js';
 
 function makeNonEmptyJsonl(sessionId: string): string {
   return [
@@ -55,6 +55,7 @@ describe('sync command — error-sentinel + retry behavior (#96)', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     delete process.env.EPISODIC_MEMORY_SUMMARY_ERROR_RETRY_HOURS;
     try {
       rmSync(testDir, { recursive: true, force: true });
@@ -77,9 +78,9 @@ describe('sync command — error-sentinel + retry behavior (#96)', () => {
     const content = readFileSync(summaryPath, 'utf-8');
     expect(content.startsWith(`${ERROR_MARKER}\n`)).toBe(true);
     expect(content).toContain('Simulated API outage');
-    // Second line should be an ISO timestamp — sanity check that it parses.
-    const [, ts] = content.split('\n');
-    expect(Number.isFinite(Date.parse(ts))).toBe(true);
+    const state = parseErrorSentinel(content);
+    expect(state.attempts).toBe(1);
+    expect(state.lastAttempt).toBeGreaterThan(0);
   });
 
   it('does not re-queue an errored file on an immediate second sync (within retry window)', async () => {
@@ -111,9 +112,8 @@ describe('sync command — error-sentinel + retry behavior (#96)', () => {
     const summaryPath = join(destDir, 'project-a', `${sessionId}-summary.txt`);
     expect(isErroredSentinel(readFileSync(summaryPath, 'utf-8'))).toBe(true);
 
-    // Backdate the sentinel's mtime past the default 1h retry window.
-    const twoHoursAgo = new Date(Date.now() - 2 * 3600_000);
-    utimesSync(summaryPath, twoHoursAgo, twoHoursAgo);
+    const twoHoursLater = Date.now() + 2 * 3600_000;
+    vi.spyOn(Date, 'now').mockReturnValue(twoHoursLater);
 
     // Second sync — now the file should be re-attempted. This time it succeeds.
     vi.mocked(summarizeConversation).mockResolvedValueOnce('Recovered summary.');
@@ -134,9 +134,8 @@ describe('sync command — error-sentinel + retry behavior (#96)', () => {
     await syncConversations(sourceDir, destDir, { skipIndex: true });
     const summaryPath = join(destDir, 'project-a', `${sessionId}-summary.txt`);
 
-    // Backdate sentinel by 1 minute — well past the 36-second threshold.
-    const oneMinuteAgo = new Date(Date.now() - 60_000);
-    utimesSync(summaryPath, oneMinuteAgo, oneMinuteAgo);
+    const oneMinuteLater = Date.now() + 60_000;
+    vi.spyOn(Date, 'now').mockReturnValue(oneMinuteLater);
 
     vi.mocked(summarizeConversation).mockResolvedValueOnce('Recovered.');
     const r2 = await syncConversations(sourceDir, destDir, { skipIndex: true });
