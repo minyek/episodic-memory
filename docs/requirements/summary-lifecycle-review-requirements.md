@@ -13,7 +13,7 @@ Deliver three reviewable pieces, preserving current upstream safeguards and the 
 ## Decisions and alternatives
 
 - Use upstream main as the delivery base. Rebasing the combined original PR would preserve one branch but obscure the requested independent pieces; extracting its retry policy gives a focused first diff.
-- Keep failure state in the existing sentinel, with a JSON second line. Sidecar files would multiply lifecycle and migration cases. Retain legacy reads and the public one-argument formatter for callers that create a first failure.
+- Keep failure state in the existing sentinel, with a JSON second line. Sidecar files would multiply lifecycle and migration cases. Retain legacy reads. The formatter takes explicit failure state: `recordSummaryFailure` and `recordSummarySkip` are its only production callers, and a default attempt count hid the attempt from test seeds.
 - Preserve good summary bytes on skipped or failed work. The coverage piece will add persistent refresh-failure state; the retry-only piece does not schedule existing good summaries.
 - Give zero-attempt skipped files fresh priority. Treating all error markers as retries would unfairly penalize work never attempted.
 - Authentication failures defer the batch without spending per-conversation attempts. Capping these would permanently abandon valid conversations while credentials are broken.

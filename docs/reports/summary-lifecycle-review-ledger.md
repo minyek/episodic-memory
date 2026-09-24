@@ -42,6 +42,17 @@ Plan: [delivery tasks](../plans/summary-lifecycle-review-plan.md).
 
 The installed dependencies rebuild `dist/mcp-server.js` to 1,028,985 bytes; the upstream committed bundle is 1,223,511 bytes. Rebuilding with every changed source module replaced by its upstream version produced **byte-identical** output to the branch build. Thus none of this task's source changes affect the reachable MCP bundle; its diff was entirely inherited dependency/build drift. Retain the upstream committed MCP bundle and run the full suite against that retained artifact. All affected individual `dist` modules are regenerated normally. Do not carry a dependency rebundle as part of the retry fix.
 
+## Review round against the maintainer feedback (2026-09-24)
+
+Re-reviewed the retry piece against the maintainer's PR review. The maintainer's table numbers this piece 2 (coverage is 1, quiescence is 3); it lands first because it is independent. F8 is met: batch skips preserve the count and refresh the time. The exhaustion half of F6 is intentional: verify names the recovery command and repair bypasses the cap.
+
+- Mutation check of the policy (cap, floor, skip counting, ordering, auth routing in sync and indexer, summary preservation, verify reason, legacy timestamp, zero-attempt priority, stop-batch skip, cap off-by-one). All but one were caught. Replacing the parsed legacy ISO time with zero stayed green, because the only legacy case was already past the retry interval. A recent legacy sentinel must now back off. After the fixes every mutation fails at least one test, including a new truthiness-guard mutation that would overwrite the empty sentinel.
+- `orderFreshBeforeRetry` takes the summary path that sync computes once at queue time, instead of deriving it from the transcript path. `formatErrorSentinel` requires explicit failure state, which reverses the earlier one-argument decision in the requirements; no production caller used the default.
+- Clean-code pass: upstream bodies of `hasRealSummary` and `shouldQueueForSummary` restored to cut churn, the sentinel file states are documented, test literals are named, and verify explains why an errored summary counts as missing.
+- MCP bundle: rebuilt with the review edits and byte-compared with a build from the previous sources. They are identical, so the upstream bundle stays retained.
+- Gate: typecheck clean and **400 tests in 65 files passed** with four Vitest workers. A first run with default workers, under a load average of about 43 on 32 cores, hit 10-second `beforeEach` timeouts in the unchanged cursor-legacy and opencode-sync suites. Both pass alone in 60 ms of test time, so that run was contention, not a regression.
+- Deferred: the auth-versus-failure branch repeats at four call sites. A single entry point needs a module boundary decision, because the sentinel module sits on the search and MCP import path and must not import the summarizer, which loads the Agent SDK.
+
 ## Impact and follow-up
 
 | Surface | Evidence and action |
