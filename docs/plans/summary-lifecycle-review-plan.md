@@ -47,4 +47,5 @@ Touch set: summary scheduling configuration/helper, indexer, sync, verify/repair
 - [ ] Apply eligibility before consuming the limit and count attempted calls, including failures (F2).
 - [ ] Test every caller with quiescence enabled and pin eventual eligibility and queue draining (F3).
 - [ ] Distinguish deferred state in verify and retain explicit forced recovery (F6).
+- [ ] Route the auth-skip versus failure decision through one entry point while reworking the sync summary loop. It is repeated in sync and the three indexer paths today. The sentinel module must not import the summarizer, because search and the MCP bundle load the sentinel module and the summarizer loads the Agent SDK.
 - [ ] Review and run the full combined gate; record release coordination and the three local delivery branches. Never push.
