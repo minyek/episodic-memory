@@ -1,6 +1,18 @@
 import * as fs from 'fs';
 import { getSummaryRetryPolicy } from './summary-config.js';
 
+/**
+ * States of `<archive>/<project>/<session>-summary.txt`:
+ *
+ * - Missing: never summarized; queue it.
+ * - Empty: permanent skip for a conversation with no exchanges.
+ * - `__ERRORED__\n{"attempts":n,"lastAttempt":epochMs}\n<message>`: the last
+ *   automatic attempt failed or was skipped. Retried once the retry interval
+ *   has passed, until `attempts` reaches the attempt limit. The stored time is
+ *   authoritative because copying an archive resets the file's mtime. Older
+ *   sentinels carry an ISO timestamp on line two and read as zero attempts.
+ * - Anything else: a real summary, never overwritten by failure recording.
+ */
 export const ERROR_MARKER = '__ERRORED__';
 const ERROR_MARKER_PREFIX = `${ERROR_MARKER}\n`;
 
@@ -11,7 +23,7 @@ export interface FailureState {
 
 export function formatErrorSentinel(
   error: unknown,
-  failure: FailureState = { attempts: 1, lastAttempt: Date.now() },
+  failure: FailureState,
 ): string {
   const message = error instanceof Error ? error.message : String(error);
   return `${ERROR_MARKER}\n${JSON.stringify(failure)}\n${message}\n`;
@@ -86,12 +98,12 @@ export function recordSummarySkip(summaryPath: string, error: unknown): void {
   recordSummaryAttempt(summaryPath, error, 0);
 }
 
-export function orderFreshBeforeRetry<T extends { path: string }>(files: T[]): T[] {
+export function orderFreshBeforeRetry<T extends { summaryPath: string }>(files: T[]): T[] {
   const fresh: T[] = [];
   const retries: T[] = [];
   for (const file of files) {
     try {
-      const content = readSummary(file.path.replace('.jsonl', '-summary.txt'));
+      const content = readSummary(file.summaryPath);
       if (content === undefined || (isErroredSentinel(content) && parseErrorSentinel(content).attempts === 0)) {
         fresh.push(file);
       } else {

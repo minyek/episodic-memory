@@ -68,6 +68,11 @@ describe('summary retry state', () => {
     expect(sentinel.parseErrorSentinel(readFileSync(summaryPath, 'utf8'))).toEqual({ attempts: 1, lastAttempt: now });
   });
 
+  it('backs off from a recent legacy ISO timestamp', () => {
+    writeFileSync(summaryPath, '__ERRORED__\n2026-09-10T11:30:00.000Z\nLegacy failure\n');
+    expect(sentinel.shouldQueueForSummary(summaryPath)).toBe(false);
+  });
+
   it.each([
     { attempts: -1, lastAttempt: now },
     { attempts: 0.5, lastAttempt: now },

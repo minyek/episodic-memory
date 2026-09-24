@@ -194,7 +194,7 @@ export async function syncConversations(
 
   // Collect files to index and summarize
   const filesToIndex: string[] = [];
-  const filesToSummarize: Array<{ path: string; sessionId: string | undefined }> = [];
+  const filesToSummarize: Array<{ path: string; summaryPath: string; sessionId: string | undefined }> = [];
 
   // Walk source directory
   const projects = fs.readdirSync(sourceDir);
@@ -236,7 +236,8 @@ export async function syncConversations(
 
         // Check if this file needs a summary (whether newly copied or existing).
         // shouldQueueForSummary skips files that already have a real summary or
-        // an empty zero-exchange sentinel, and retries stale error sentinels (#96).
+        // an empty zero-exchange sentinel, and retries failed attempts after the
+        // retry interval until the attempt limit.
         if (!options.skipSummaries) {
           const summaryPath = destFile.replace('.jsonl', '-summary.txt');
           if (shouldQueueForSummary(summaryPath) && !shouldSkipConversation(destFile)) {
@@ -245,7 +246,7 @@ export async function syncConversations(
             // agent-<hex>.jsonl), queue anyway — summarizeConversation falls
             // back to summarizing from the transcript text.
             const sessionId = extractSessionIdFromPath(destFile) ?? undefined;
-            filesToSummarize.push({ path: destFile, sessionId });
+            filesToSummarize.push({ path: destFile, summaryPath, sessionId });
           }
         }
       } catch (error) {
@@ -366,9 +367,8 @@ export async function syncConversations(
     let stopBatch = false;
     let stopBatchMessage = '';
 
-    for (const { path: filePath, sessionId } of toSummarize) {
+    for (const { path: filePath, summaryPath, sessionId } of toSummarize) {
       if (stopBatch) {
-        const summaryPath = filePath.replace('.jsonl', '-summary.txt');
         recordSummarySkip(summaryPath, stopBatchMessage);
         result.errors.push({
           file: filePath,
@@ -383,7 +383,6 @@ export async function syncConversations(
 
         if (exchanges.length === 0) {
           // Skip empty conversations — write an empty -summary.txt sentinel so they aren't re-queued forever
-          const summaryPath = filePath.replace('.jsonl', '-summary.txt');
           fs.writeFileSync(summaryPath, '', 'utf-8');
           continue;
         }
@@ -391,11 +390,9 @@ export async function syncConversations(
         console.log(`  Summarizing ${path.basename(filePath)} (${exchanges.length} exchanges)...`);
         const summary = await summarizeConversation(exchanges, sessionId);
 
-        const summaryPath = filePath.replace('.jsonl', '-summary.txt');
         fs.writeFileSync(summaryPath, summary, 'utf-8');
         result.summarized++;
       } catch (error) {
-        const summaryPath = filePath.replace('.jsonl', '-summary.txt');
         const authFailure = isAuthFailure(error);
         if (authFailure) recordSummarySkip(summaryPath, error);
         else recordSummaryFailure(summaryPath, error);

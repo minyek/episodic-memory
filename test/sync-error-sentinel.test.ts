@@ -182,9 +182,11 @@ describe('sync command — error-sentinel + retry behavior (#96)', () => {
     expect(shouldQueueForSummary(sentinelPath)).toBe(false);
   });
 
-  it('formatErrorSentinel + isErroredSentinel round-trip', () => {
-    const s = formatErrorSentinel(new Error('boom'));
+  it('formatErrorSentinel + parseErrorSentinel + isErroredSentinel round-trip', () => {
+    const state = { attempts: 2, lastAttempt: 1_700_000_000_000 };
+    const s = formatErrorSentinel(new Error('boom'), state);
     expect(isErroredSentinel(s)).toBe(true);
+    expect(parseErrorSentinel(s)).toEqual(state);
     expect(s).toContain('boom');
     expect(isErroredSentinel('Real summary content.')).toBe(false);
     expect(isErroredSentinel('')).toBe(false);
@@ -224,7 +226,7 @@ describe('hasRealSummary helper', () => {
   it('returns false for error sentinels (#96) — they are not real coverage', async () => {
     const { hasRealSummary } = await import('../src/summary-sentinel.js');
     const p = join(testDir, 'errored.txt');
-    writeFileSync(p, formatErrorSentinel(new Error('outage')), 'utf-8');
+    writeFileSync(p, formatErrorSentinel(new Error('outage'), { attempts: 1, lastAttempt: Date.now() }), 'utf-8');
     expect(hasRealSummary(p)).toBe(false);
   });
 });
