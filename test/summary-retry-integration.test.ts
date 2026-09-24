@@ -19,6 +19,16 @@ import { summarizeConversation } from '../src/summarizer.js';
 import { indexConversations, indexSession, indexUnprocessed } from '../src/indexer.js';
 import { verifyIndex, repairIndex } from '../src/verify.js';
 
+const HOUR_MS = 60 * 60 * 1000;
+// Runs are spaced past the one-hour retry interval stubbed below.
+const PAST_RETRY_INTERVAL_MS = 2 * HOUR_MS;
+
+const indexEntryPoints: Record<'all' | 'session' | 'unprocessed', (sessionId: string) => Promise<void>> = {
+  all: () => indexConversations(),
+  session: sessionId => indexSession(sessionId),
+  unprocessed: () => indexUnprocessed(),
+};
+
 function exchange(sessionId: string, turn: number): string {
   return [
     { type: 'user', uuid: `${sessionId}-u${turn}`, sessionId, timestamp: '2026-01-01T00:00:00Z', message: { role: 'user', content: `Explain deployment step ${turn}.` } },
@@ -62,7 +72,7 @@ describe('summary retry lifecycle through callers', () => {
   }
 
   function seedFailure(summaryPath: string, attempts: number): void {
-    writeFileSync(summaryPath, `__ERRORED__\n${JSON.stringify({ attempts, lastAttempt: now - 7200000 })}\nFailure\n`);
+    writeFileSync(summaryPath, `__ERRORED__\n${JSON.stringify({ attempts, lastAttempt: now - PAST_RETRY_INTERVAL_MS })}\nFailure\n`);
   }
 
   function failureState(summaryPath: string): unknown {
@@ -71,12 +81,13 @@ describe('summary retry lifecycle through callers', () => {
 
   it('stops automatic sync at the configured failure cap', async () => {
     const { summaryPath } = addConversation(0);
+    const secondRunAt = now + PAST_RETRY_INTERVAL_MS;
     for (let run = 0; run < 4; run++) {
       await syncConversations(source, archive, { skipIndex: true });
-      now += 7200000;
+      now += PAST_RETRY_INTERVAL_MS;
     }
     expect(summarizeConversation).toHaveBeenCalledTimes(2);
-    expect(failureState(summaryPath)).toEqual({ attempts: 2, lastAttempt: now - 21600000 });
+    expect(failureState(summaryPath)).toEqual({ attempts: 2, lastAttempt: secondRunAt });
   });
 
   it('selects fresh work ahead of eligible retries before the limit', async () => {
@@ -109,7 +120,7 @@ describe('summary retry lifecycle through callers', () => {
     vi.mocked(summarizeConversation).mockRejectedValue(new Error('Failed to authenticate. API Error: 401'));
     for (let run = 0; run < 3; run++) {
       await syncConversations(source, archive, { skipIndex: true });
-      now += 7200000;
+      now += PAST_RETRY_INTERVAL_MS;
     }
     vi.mocked(summarizeConversation).mockResolvedValue('Recovered after reauthentication');
     const result = await syncConversations(source, archive, { skipIndex: true });
@@ -137,10 +148,8 @@ describe('summary retry lifecycle through callers', () => {
   it.each(['all', 'session', 'unprocessed'] as const)('records and caps failures from the %s index entry point', async entry => {
     const { id, sourcePath, summaryPath } = addConversation(0);
     for (let run = 0; run < 3; run++) {
-      if (entry === 'all') await indexConversations();
-      if (entry === 'session') await indexSession(id);
-      if (entry === 'unprocessed') await indexUnprocessed();
-      now += 7200000;
+      await indexEntryPoints[entry](id);
+      now += PAST_RETRY_INTERVAL_MS;
       appendFileSync(sourcePath, exchange(id, run + 2));
     }
     expect(summarizeConversation).toHaveBeenCalledTimes(2);
@@ -150,9 +159,7 @@ describe('summary retry lifecycle through callers', () => {
   it.each(['all', 'session', 'unprocessed'] as const)('keeps authentication failures retryable through the %s index entry point', async entry => {
     const { id, summaryPath } = addConversation(0);
     vi.mocked(summarizeConversation).mockRejectedValue(new Error('Failed to authenticate. API Error: 401'));
-    if (entry === 'all') await indexConversations();
-    if (entry === 'session') await indexSession(id);
-    if (entry === 'unprocessed') await indexUnprocessed();
+    await indexEntryPoints[entry](id);
     expect(failureState(summaryPath)).toEqual({ attempts: 0, lastAttempt: now });
   });
 

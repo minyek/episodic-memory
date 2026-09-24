@@ -67,6 +67,7 @@ export async function verifyIndex(): Promise<VerificationResult> {
         result.missing.push({ path: conversationPath, reason: 'No summary file' });
         continue;
       }
+      // A failed summary counts as missing so repair re-attempts it, even past the retry limit.
       const summaryContent = fs.readFileSync(summaryPath, 'utf-8');
       if (isErroredSentinel(summaryContent)) {
         const reason = isSummaryRetryExhausted(parseErrorSentinel(summaryContent))

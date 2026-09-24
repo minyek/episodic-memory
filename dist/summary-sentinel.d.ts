@@ -18,8 +18,19 @@ export interface FailureState {
 export declare function formatErrorSentinel(error: unknown, failure: FailureState): string;
 export declare function isErroredSentinel(content: string): boolean;
 export declare function parseErrorSentinel(content: string): FailureState;
-export declare function hasRealSummary(summaryPath: string): boolean;
 export declare function isSummaryRetryExhausted(failure: FailureState): boolean;
+/**
+ * True when the sentinel at `summaryPath` represents a real summary —
+ * a non-empty file that is not an error marker. Empty zero-exchange
+ * sentinels and error sentinels both return false. Use this for callers
+ * that care about "is this conversation summarized and useful" (stats,
+ * verify, search).
+ */
+export declare function hasRealSummary(summaryPath: string): boolean;
+/**
+ * True when the conversation at `summaryPath` should be (re-)summarized:
+ * no sentinel yet, or an error marker that is due for retry.
+ */
 export declare function shouldQueueForSummary(summaryPath: string): boolean;
 export declare function recordSummaryFailure(summaryPath: string, error: unknown): void;
 export declare function recordSummarySkip(summaryPath: string, error: unknown): void;

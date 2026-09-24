@@ -279,14 +279,14 @@ Only the exact value `1` silences the metered-API warning; any other value still
 Summary retries wait one hour by default and stop after five failed attempts per
 conversation. Set a positive number of hours and a positive integer attempt
 limit to override these defaults; invalid values use the defaults. Fresh work
-is processed before retries. Authentication failures defer work without spending
-the attempt limit, and skipped work preserves its previous failure count.
+is processed before retries. Authentication failures, and the conversations
+skipped after one, retry later without spending the attempt limit.
 
 Run `episodic-memory-index --verify` to identify exhausted summaries. After fixing
 the underlying problem, `episodic-memory-index --repair` explicitly retries failed
 summaries, including exhausted ones, and repairs other reported index issues.
-Successful repair clears the failure state. Existing summaries and indexed
-conversation content remain available when automatic summarization stops.
+Successful repair clears the failure state. A conversation whose summary stops
+retrying stays indexed and searchable.
 
 ### Routing through AWS Bedrock
 

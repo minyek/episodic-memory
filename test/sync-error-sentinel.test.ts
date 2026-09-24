@@ -68,6 +68,7 @@ describe('sync command — error-sentinel + retry behavior (#96)', () => {
     writeFileSync(join(sourceDir, 'project-a', `${sessionId}.jsonl`), makeNonEmptyJsonl(sessionId), 'utf-8');
 
     vi.mocked(summarizeConversation).mockRejectedValue(new Error('Simulated API outage'));
+    const syncStartedAt = Date.now();
     const r1 = await syncConversations(sourceDir, destDir, { skipIndex: true });
 
     expect(r1.summarized).toBe(0);
@@ -80,7 +81,7 @@ describe('sync command — error-sentinel + retry behavior (#96)', () => {
     expect(content).toContain('Simulated API outage');
     const state = parseErrorSentinel(content);
     expect(state.attempts).toBe(1);
-    expect(state.lastAttempt).toBeGreaterThan(0);
+    expect(state.lastAttempt).toBeGreaterThanOrEqual(syncStartedAt);
   });
 
   it('does not re-queue an errored file on an immediate second sync (within retry window)', async () => {
@@ -112,6 +113,7 @@ describe('sync command — error-sentinel + retry behavior (#96)', () => {
     const summaryPath = join(destDir, 'project-a', `${sessionId}-summary.txt`);
     expect(isErroredSentinel(readFileSync(summaryPath, 'utf-8'))).toBe(true);
 
+    // Advance the clock past the default 1h retry window.
     const twoHoursLater = Date.now() + 2 * 3600_000;
     vi.spyOn(Date, 'now').mockReturnValue(twoHoursLater);
 
@@ -134,6 +136,7 @@ describe('sync command — error-sentinel + retry behavior (#96)', () => {
     await syncConversations(sourceDir, destDir, { skipIndex: true });
     const summaryPath = join(destDir, 'project-a', `${sessionId}-summary.txt`);
 
+    // Advance the clock 1 minute — well past the 36-second threshold.
     const oneMinuteLater = Date.now() + 60_000;
     vi.spyOn(Date, 'now').mockReturnValue(oneMinuteLater);
 
