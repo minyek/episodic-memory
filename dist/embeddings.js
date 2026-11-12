@@ -13,39 +13,44 @@
 const MODEL_ID = 'Xenova/bge-small-en-v1.5';
 const MODEL_DTYPE = 'q8';
 export const BGE_QUERY_PREFIX = 'Represent this sentence for searching relevant passages: ';
+const DEFAULT_INTRA_OP_THREADS = 2;
 /**
- * Resolve an intra-op thread cap for the embedding session, or null to leave
+ * Resolve the intra-op thread cap for the embedding session, or null to leave
  * onnxruntime at its default (one worker per core).
  *
- * Embedding is done one exchange at a time (batch=1) throughout indexing, sync,
- * and the re-embed migration. At that size onnxruntime-node's default intra-op
- * thread pool fans each tiny int8 matmul across every core, which on Apple
- * Silicon pegs ~5 cores for almost no throughput gain and makes a bulk re-embed
- * hog the whole machine. Capping intra-op threads keeps embedding off the
- * user's cores; measured on an M-series Mac, a cap of 2 is as fast or faster
- * than the uncapped default while using ~1.7 cores instead of ~5 (and pulls
- * further ahead when the machine is otherwise busy, since it stops the pool
- * from oversubscribing).
+ * Embedding runs one exchange at a time (batch=1) through indexing, sync and
+ * the re-embed migration. At that size the default pool fans each tiny int8
+ * matmul across every core and its idle workers spin: measured on a 32-core
+ * Linux host, 100 embeddings used 50 CPU-seconds with 32 threads busy, against
+ * 2.4-2.6 CPU-seconds for 300 embeddings capped at 2. Vectors are
+ * bit-identical, so no re-index follows.
  *
- * This stays on the same CPU / q8 execution provider, so embeddings are
- * bit-identical to the uncapped output — no re-index is triggered. (CoreML and
- * WebGPU were evaluated and rejected: on this quantized model they either run
- * far slower and never leave the CPU, or require an fp32 model whose vectors
- * differ from the stored q8 ones and would force a full re-index.)
- *
- * Override with EPISODIC_MEMORY_EMBED_THREADS: a positive integer sets the cap;
- * 0 (or any non-positive/invalid value) restores onnxruntime's default.
+ * Override with EPISODIC_MEMORY_EMBED_THREADS: a positive integer sets the cap,
+ * and exactly "0" restores onnxruntime's default. Any other value keeps the cap
+ * of 2 and says so.
  */
 export function resolveIntraOpThreads() {
     const override = process.env.EPISODIC_MEMORY_EMBED_THREADS;
-    if (override !== undefined) {
-        const n = Number.parseInt(override, 10);
-        return Number.isFinite(n) && n > 0 ? n : null;
-    }
-    if (process.platform === 'darwin' && process.arch === 'arm64') {
-        return 2;
-    }
-    return null;
+    if (override === undefined)
+        return DEFAULT_INTRA_OP_THREADS;
+    if (override === '0')
+        return null;
+    if (/^[1-9][0-9]*$/.test(override))
+        return Number.parseInt(override, 10);
+    console.error(`episodic-memory: ignoring invalid EPISODIC_MEMORY_EMBED_THREADS=${JSON.stringify(override)}; ` +
+        `using ${DEFAULT_INTRA_OP_THREADS} threads`);
+    return DEFAULT_INTRA_OP_THREADS;
+}
+/**
+ * Session options for the embedding pipeline. Spin-waiting is always off, so
+ * idle workers sleep instead of burning a core; the value is a string because
+ * the native binding rejects other types.
+ */
+export function buildEmbeddingSessionOptions(intraOpThreads) {
+    return {
+        ...(intraOpThreads !== null && { intraOpNumThreads: intraOpThreads, interOpNumThreads: 1 }),
+        extra: { 'session.intra_op.allow_spinning': '0' },
+    };
 }
 let embeddingPipeline = null;
 /**
@@ -89,14 +94,8 @@ export async function initEmbeddings() {
     const options = {
         dtype: MODEL_DTYPE,
         progress_callback: () => { },
+        session_options: buildEmbeddingSessionOptions(resolveIntraOpThreads()),
     };
-    const intraOpThreads = resolveIntraOpThreads();
-    if (intraOpThreads !== null) {
-        options.session_options = {
-            intraOpNumThreads: intraOpThreads,
-            interOpNumThreads: 1,
-        };
-    }
     embeddingPipeline = await pipeline('feature-extraction', MODEL_ID, options);
     console.error('Embedding model loaded');
 }

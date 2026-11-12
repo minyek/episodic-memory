@@ -122,19 +122,16 @@ function hasConversationContent(filePath) {
 export function buildSyncOptionsFromEnv(env) {
     return { skipSummaries: env.EPISODIC_MEMORY_SKIP_SUMMARIES === '1' };
 }
-function copyIfNewer(src, dest) {
-    // Ensure destination directory exists
+function archiveIsCurrent(srcStat, dest) {
+    if (!fs.existsSync(dest))
+        return false;
+    return fs.statSync(dest).mtimeMs >= srcStat.mtimeMs;
+}
+function copyToArchive(pending) {
+    const { src, dest, srcStat } = pending;
     const destDir = path.dirname(dest);
     if (!fs.existsSync(destDir)) {
         fs.mkdirSync(destDir, { recursive: true });
-    }
-    // Check if destination exists and is up-to-date
-    if (fs.existsSync(dest)) {
-        const srcStat = fs.statSync(src);
-        const destStat = fs.statSync(dest);
-        if (destStat.mtimeMs >= srcStat.mtimeMs) {
-            return false; // Dest is current, skip
-        }
     }
     // Atomic copy: temp file + rename
     const tempDest = dest + '.tmp.' + process.pid;
@@ -144,10 +141,8 @@ function copyIfNewer(src, dest) {
     // agent transcripts) fall back to file mtime. Round up to the next whole
     // millisecond — utimes can't always represent the source's sub-millisecond
     // precision, and a dest mtime even fractionally older would defeat the
-    // skip-if-current check above on every subsequent sync.
-    const srcStat = fs.statSync(src);
+    // skip-if-current check on every subsequent sync.
     fs.utimesSync(dest, srcStat.atimeMs / 1000, Math.ceil(srcStat.mtimeMs) / 1000);
-    return true;
 }
 export function extractSessionIdFromPath(filePath) {
     // Extract session ID from Claude filename or Codex rollout filename.
@@ -198,10 +193,10 @@ export async function syncConversations(sourceDir, destDir, options = {}) {
                     result.skipped++;
                     continue;
                 }
-                const wasCopied = copyIfNewer(srcFile, destFile);
-                if (wasCopied) {
-                    result.copied++;
-                    filesToIndex.push(destFile);
+                const srcStat = fs.statSync(srcFile);
+                const needsCopy = !archiveIsCurrent(srcStat, destFile);
+                if (needsCopy) {
+                    filesToIndex.push({ src: srcFile, dest: destFile, srcStat, copied: false });
                 }
                 else {
                     result.skipped++;
@@ -211,7 +206,7 @@ export async function syncConversations(sourceDir, destDir, options = {}) {
                 // an empty zero-exchange sentinel, and retries stale error sentinels (#96).
                 if (!options.skipSummaries) {
                     const summaryPath = destFile.replace('.jsonl', '-summary.txt');
-                    if (shouldQueueForSummary(summaryPath) && !shouldSkipConversation(destFile)) {
+                    if (shouldQueueForSummary(summaryPath) && !shouldSkipConversation(needsCopy ? srcFile : destFile)) {
                         // sessionId enables Claude session-resume summarization; when the
                         // filename has no UUID to extract (e.g. subagent transcripts named
                         // agent-<hex>.jsonl), queue anyway — summarizeConversation falls
@@ -229,7 +224,24 @@ export async function syncConversations(sourceDir, destDir, options = {}) {
             }
         }
     }
-    // Index copied files (unless skipIndex is set)
+    // A file reaches the archive only after its exchanges are indexed, so a sync
+    // that stops part-way leaves every unfinished file to be indexed next time.
+    const archivePending = (pending) => {
+        if (pending.copied)
+            return;
+        try {
+            copyToArchive(pending);
+            pending.copied = true;
+            result.copied++;
+        }
+        catch (error) {
+            result.errors.push({
+                file: pending.src,
+                error: error instanceof Error ? error.message : String(error)
+            });
+        }
+    };
+    // Index files that need copying (unless skipIndex is set)
     if (!options.skipIndex && filesToIndex.length > 0) {
         const { parseConversation } = await import('./parser.js');
         // Load the embedding backend first. It can fail on hosts where sharp's
@@ -259,11 +271,12 @@ export async function syncConversations(sourceDir, destDir, options = {}) {
             const db = initDatabase();
             const maxMessageBytes = getMaxMessageBytes();
             let oversizeSkipped = 0;
-            for (const file of filesToIndex) {
+            for (const pending of filesToIndex) {
+                const file = pending.dest;
                 try {
                     // Check for DO NOT INDEX marker
-                    if (shouldSkipConversation(file)) {
-                        continue; // Skip indexing but file is already copied
+                    if (shouldSkipConversation(pending.src)) {
+                        continue; // Skip indexing; the finally clause still archives the file
                     }
                     // High-water mark: index exchanges past the last line we've already
                     // covered. Transcript JSONLs are append-only, so MAX(line_end) tells
@@ -272,7 +285,7 @@ export async function syncConversations(sourceDir, destDir, options = {}) {
                     const hw = db.prepare('SELECT COALESCE(MAX(line_end), 0) as maxLine FROM exchanges WHERE archive_path = ?').get(file);
                     const maxIndexedLine = hw.maxLine;
                     const project = path.basename(path.dirname(file));
-                    const exchanges = await parseConversation(file, project, file);
+                    const exchanges = await parseConversation(pending.src, project, file);
                     const newExchanges = maxIndexedLine > 0
                         ? exchanges.filter(e => e.lineStart > maxIndexedLine)
                         : exchanges;
@@ -296,6 +309,9 @@ export async function syncConversations(sourceDir, destDir, options = {}) {
                         error: error instanceof Error ? error.message : String(error)
                     });
                 }
+                finally {
+                    archivePending(pending);
+                }
             }
             if (oversizeSkipped > 0) {
                 console.log(`  Skipped ${oversizeSkipped} oversize exchange(s) (> ${maxMessageBytes} bytes; set EPISODIC_MEMORY_MAX_MESSAGE_BYTES to change) — likely embedded-transcript payloads (#139)`);
@@ -303,6 +319,10 @@ export async function syncConversations(sourceDir, destDir, options = {}) {
             db.close();
         }
     }
+    // Files not indexed this run (indexing skipped or unavailable) are still
+    // archived before summaries read them.
+    for (const pending of filesToIndex)
+        archivePending(pending);
     // Generate summaries for files that need them
     if (!options.skipSummaries && filesToSummarize.length > 0) {
         const { parseConversation } = await import('./parser.js');

@@ -28,7 +28,26 @@ export interface FileLockHandle {
     path: string;
     release: () => void;
 }
-export declare function acquireFileLock(lockPath: string): FileLockHandle | null;
+/**
+ * Why a held lock stopped being ours: another process took the directory over
+ * ('taken-over'), or the directory disappeared ('vanished').
+ */
+export type CompromiseKind = 'taken-over' | 'vanished';
+export interface AcquireOptions {
+    /**
+     * Called from the heartbeat timer when the lock is no longer ours. The
+     * library's own default throws from the timer; this wrapper's default does
+     * nothing, so a lost lock never crashes the holder.
+     */
+    onCompromised?: (kind: CompromiseKind, holderPid: number | null) => void;
+    /** Filesystem used by the lock library; tests inject one to pause between calls. */
+    fs?: object;
+    /** Milliseconds after which an unrefreshed lock may be taken over. */
+    stale?: number;
+    /** Milliseconds between heartbeats. */
+    update?: number;
+}
+export declare function acquireFileLock(lockPath: string, options?: AcquireOptions): FileLockHandle | null;
 export declare function releaseFileLock(handle: FileLockHandle): void;
 /**
  * Read the recorded holder PID from a lock file's diagnostic content.

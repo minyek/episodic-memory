@@ -35,6 +35,27 @@ export interface FileLockHandle {
 }
 
 /**
+ * Why a held lock stopped being ours: another process took the directory over
+ * ('taken-over'), or the directory disappeared ('vanished').
+ */
+export type CompromiseKind = 'taken-over' | 'vanished';
+
+export interface AcquireOptions {
+  /**
+   * Called from the heartbeat timer when the lock is no longer ours. The
+   * library's own default throws from the timer; this wrapper's default does
+   * nothing, so a lost lock never crashes the holder.
+   */
+  onCompromised?: (kind: CompromiseKind, holderPid: number | null) => void;
+  /** Filesystem used by the lock library; tests inject one to pause between calls. */
+  fs?: object;
+  /** Milliseconds after which an unrefreshed lock may be taken over. */
+  stale?: number;
+  /** Milliseconds between heartbeats. */
+  update?: number;
+}
+
+/**
  * Default stale threshold for the underlying proper-lockfile mtime heartbeat.
  * 10 minutes is well above the longest expected sync (a few minutes for a
  * cold start with hundreds of pending summaries) and the longest expected
@@ -42,7 +63,7 @@ export interface FileLockHandle {
  */
 const DEFAULT_STALE_MS = 10 * 60 * 1000;
 
-export function acquireFileLock(lockPath: string): FileLockHandle | null {
+export function acquireFileLock(lockPath: string, options: AcquireOptions = {}): FileLockHandle | null {
   fs.mkdirSync(path.dirname(lockPath), { recursive: true });
 
   // proper-lockfile expects the target path to exist. Touch it if missing —
@@ -58,7 +79,13 @@ export function acquireFileLock(lockPath: string): FileLockHandle | null {
     release = lockfile.lockSync(lockPath, {
       realpath: false,
       retries: 0,
-      stale: DEFAULT_STALE_MS,
+      stale: options.stale ?? DEFAULT_STALE_MS,
+      ...(options.update !== undefined && { update: options.update }),
+      ...(options.fs !== undefined && { fs: options.fs as any }),
+      onCompromised: () => {
+        const kind: CompromiseKind = fs.existsSync(`${lockPath}.lock`) ? 'taken-over' : 'vanished';
+        options.onCompromised?.(kind, readLockHolder(lockPath));
+      },
     });
   } catch (err: any) {
     if (err.code === 'ELOCKED') return null;
@@ -75,9 +102,13 @@ export function acquireFileLock(lockPath: string): FileLockHandle | null {
 }
 
 export function releaseFileLock(handle: FileLockHandle): void {
+  // Remove our diagnostic file before the lock directory: once the directory
+  // is gone a successor can acquire and write its own PID file, which this
+  // release must not delete.
+  try {
+    if (readLockHolder(handle.path) === process.pid) fs.unlinkSync(handle.path);
+  } catch {}
   try { handle.release(); } catch {}
-  // Clean up the diagnostic file. A subsequent acquirer will recreate it.
-  try { fs.unlinkSync(handle.path); } catch {}
 }
 
 /**

@@ -244,6 +244,20 @@ export EPISODIC_MEMORY_SKIP_SUMMARIES=1
 # EPISODIC_MEMORY_SKIP_SUMMARIES, which only skips summaries.
 export EPISODIC_MEMORY_DISABLE_AUTO_SYNC=1
 
+# CPU used by embedding (default: 2 threads, on every platform). Idle
+# onnxruntime workers do not spin. A positive integer sets the thread count;
+# exactly 0 restores onnxruntime's own default of one thread per core.
+export EPISODIC_MEMORY_EMBED_THREADS=2
+
+# Wall-clock limit for one background sync, in milliseconds (default: 1800000 =
+# 30 minutes). At the limit the sync exits with code 124 after releasing its
+# locks; indexing is incremental, so the next sync carries on. Exactly 0
+# disables the limit; an empty or invalid value keeps the default. A background
+# sync also runs at nice 10 and takes a per-user lock (in $XDG_RUNTIME_DIR, else
+# the temp dir) so syncs started under different HOMEs or config dirs cannot run
+# at the same time; a foreground `episodic-memory sync` does neither.
+export EPISODIC_MEMORY_SYNC_TIMEOUT_MS=1800000
+
 # Skip indexing any single message larger than this many bytes (default: 262144
 # = 256 KB). A message this large is almost never a real conversational turn —
 # it is a foreign agent's prompt with a whole conversation transcript pasted in,
