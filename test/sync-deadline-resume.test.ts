@@ -12,6 +12,7 @@ const embedState = vi.hoisted(() => ({
   hangOn: null as string | null,
   reachedHang: null as null | (() => void),
   embedded: [] as string[],
+  onEmbed: null as null | ((user: string) => void),
 }));
 
 vi.mock('../src/embeddings.js', () => ({
@@ -102,6 +103,23 @@ describe('sync resumes after an interrupted index run', () => {
     for (const f of files) {
       expect(existsSync(join(destDir, 'proj', `${f.id}.jsonl`))).toBe(true);
     }
+  });
+
+  // Standing safety invariant: the walk archives every new conversation before
+  // indexing starts, so one that only its source held survives an interrupted
+  // run and the later removal of that source.
+  it('keeps in the archive a conversation whose source is removed after a run abandoned mid-index', async () => {
+    embedState.hangOn = 'bravo-two';
+    const reached = new Promise<void>((resolve) => { embedState.reachedHang = resolve; });
+    void syncConversations(sourceDir, destDir, { skipSummaries: true });
+    await reached;
+
+    rmSync(join(sourceDir, 'proj', `${files[2].id}.jsonl`));
+    embedState.hangOn = null;
+    embedState.reachedHang = null;
+    await syncConversations(sourceDir, destDir, { skipSummaries: true });
+
+    expect(existsSync(join(destDir, 'proj', `${files[2].id}.jsonl`))).toBe(true);
   });
 
   it('reports every file as copied and indexed on an uninterrupted run', async () => {

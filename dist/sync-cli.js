@@ -8,7 +8,7 @@ import { exportOpencodeSessions } from './opencode-sync.js';
 import { spawn } from 'child_process';
 import fs from 'fs';
 import { formatLogLine, getSyncLogPath, getSyncLockPath } from './logging.js';
-import { acquireFileLock, readLockHolder, releaseFileLock } from './file-lock.js';
+import { acquireFileLock, describeLockHolder, readLockHolder, releaseFileLock } from './file-lock.js';
 import { BACKGROUND_CHILD_ENV, acquireUserSyncSlot, lowerBackgroundPriority, startBackgroundSyncLimits, startSyncDeadline, } from './sync-limits.js';
 const args = process.argv.slice(2);
 // Reentrancy guard (#87): if this sync was triggered by a SessionStart hook
@@ -177,9 +177,7 @@ if (sourceDirs.length === 0) {
 const syncLockPath = getSyncLockPath();
 const syncLock = acquireFileLock(syncLockPath);
 if (!syncLock) {
-    const holder = readLockHolder(syncLockPath);
-    const holderLabel = holder !== null ? `pid ${holder}` : 'another process';
-    console.error(`episodic-memory: sync already running (${holderLabel}); skipping`);
+    console.error(`episodic-memory: sync already running (${describeLockHolder(readLockHolder(syncLockPath))}); skipping`);
     process.exit(0);
 }
 let userSyncLock = null;

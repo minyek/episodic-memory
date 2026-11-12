@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { spawnSync } from 'child_process';
 import { mkdtempSync, mkdirSync, rmSync, readFileSync, existsSync, readdirSync } from 'fs';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import { dirname, join } from 'path';
 import { tmpdir } from 'os';
 import { BACKGROUND_CHILD_ENV, resolveUserSyncLockPath } from '../src/sync-limits.js';
@@ -97,10 +97,26 @@ describe('sync-cli background child limits', () => {
     expect(log).not.toMatch(/setPriority/);
   });
 
-  it('keeps the default deadline when the configured one is invalid, and says so', () => {
+  it('warns about an invalid deadline value and still exits when the sync finishes', () => {
     const { result } = run({ child: true, deadlineMs: 'abc', holdMs: 0 });
 
     expect(result.status).toBe(0);
     expect(result.stderr).toMatch(/invalid EPISODIC_MEMORY_SYNC_TIMEOUT_MS/);
+  });
+});
+
+// Behaviour (spec AC 2): a sync that finishes before its deadline exits at
+// once with its own code; a timer that kept the event loop alive would hold
+// both locks until it fired, then exit 124.
+describe('startSyncDeadline', () => {
+  it('lets a process with nothing left to do exit before the deadline fires', () => {
+    const syncLimits = pathToFileURL(join(REPO_ROOT, 'dist', 'sync-limits.js')).href;
+    const script = `
+      import { startSyncDeadline } from ${JSON.stringify(syncLimits)};
+      startSyncDeadline(1000, () => process.exit(124));
+    `;
+    // timeout: a hang guard far above the 1 s deadline.
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf-8', timeout: 120_000 });
+    expect(result.status).toBe(0);
   });
 });

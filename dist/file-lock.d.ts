@@ -55,3 +55,5 @@ export declare function releaseFileLock(handle: FileLockHandle): void;
  * The PID is informational only — the real mutex lives in `<lockPath>.lock/`.
  */
 export declare function readLockHolder(lockPath: string): number | null;
+/** Names a lock's holder in a diagnostic line: its PID, or "another process" when no PID was recorded. */
+export declare function describeLockHolder(pid: number | null): string;

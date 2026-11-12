@@ -36,10 +36,8 @@ const DEFAULT_INTRA_OP_THREADS = 2;
  */
 export function resolveIntraOpThreads(): number | null {
   const threads = parseEnvCount(
-    'EPISODIC_MEMORY_EMBED_THREADS',
     process.env.EPISODIC_MEMORY_EMBED_THREADS,
-    DEFAULT_INTRA_OP_THREADS,
-    'threads',
+    { name: 'EPISODIC_MEMORY_EMBED_THREADS', fallback: DEFAULT_INTRA_OP_THREADS, unit: 'threads' },
     message => console.error(message),
   );
   return threads === 0 ? null : threads;

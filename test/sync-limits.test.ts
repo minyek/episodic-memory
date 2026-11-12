@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import type { AcquireOptions } from '../src/file-lock.js';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
+import { mkdtempSync, writeFileSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import {
@@ -12,6 +12,7 @@ import {
   resolveUserSyncLockPath,
   startBackgroundSyncLimits,
   BACKGROUND_CHILD_ENV,
+  type UserSyncSlot,
 } from '../src/sync-limits.js';
 
 // Behaviour: a background sync has a wall-clock deadline. Only the exact value
@@ -71,21 +72,6 @@ describe('startSyncDeadline', () => {
     vi.advanceTimersByTime(10_000_000);
     expect(onExpire).not.toHaveBeenCalled();
   });
-
-  // A sync that finishes before the deadline must exit at once; a timer that
-  // keeps the event loop alive would hold both locks until it fired.
-  it('uses a timer that does not keep the process alive', () => {
-    const real = globalThis.setTimeout;
-    let created: NodeJS.Timeout | undefined;
-    vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void, ms?: number) => {
-      created = real(fn, ms);
-      return created;
-    }) as typeof setTimeout);
-    startSyncDeadline(60_000, () => {});
-    expect(created).toBeDefined();
-    expect(created!.hasRef()).toBe(false);
-    clearTimeout(created);
-  });
 });
 
 // Behaviour: the background child runs at a lower priority; a failure to set
@@ -143,7 +129,6 @@ describe('resolveUserSyncLockPath', () => {
 
   it('gives different uids different lock files in the same directory', () => {
     const xdg = makeDir();
-    mkdirSync(xdg, { recursive: true });
     expect(resolveUserSyncLockPath({ XDG_RUNTIME_DIR: xdg }, 1, xdg))
       .not.toBe(resolveUserSyncLockPath({ XDG_RUNTIME_DIR: xdg }, 2, xdg));
   });

@@ -127,22 +127,31 @@ function archiveIsCurrent(srcStat, dest) {
         return false;
     return fs.statSync(dest).mtimeMs >= srcStat.mtimeMs;
 }
-function copyToArchive(pending) {
+// The walk's copy is stamped one millisecond older than its source, so it
+// keeps the conversation but is not yet current: a sync that stops before the
+// file's index turn leaves it for the next sync to index.
+function pendingMtimeMs(srcStat) {
+    return currentMtimeMs(srcStat) - 1;
+}
+// Rounded up to the next whole millisecond: utimes can't always represent the
+// source's sub-millisecond precision, and a copy even fractionally older would
+// defeat the skip-if-current check on every subsequent sync.
+function currentMtimeMs(srcStat) {
+    return Math.ceil(srcStat.mtimeMs);
+}
+function copyToArchive(pending, mtimeMs) {
     const { src, dest, srcStat } = pending;
     const destDir = path.dirname(dest);
     if (!fs.existsSync(destDir)) {
         fs.mkdirSync(destDir, { recursive: true });
     }
-    // Atomic copy: temp file + rename
+    // Atomic copy: temp file + rename. The temp file takes its mtime first, so
+    // the archive never holds a copy stamped newer than its source. Harnesses
+    // without per-message timestamps (Cursor agent transcripts) fall back to it.
     const tempDest = dest + '.tmp.' + process.pid;
     fs.copyFileSync(src, tempDest);
+    fs.utimesSync(tempDest, srcStat.atimeMs / 1000, mtimeMs / 1000);
     fs.renameSync(tempDest, dest); // Atomic on same filesystem
-    // Preserve source mtime: harnesses without per-message timestamps (Cursor
-    // agent transcripts) fall back to file mtime. Round up to the next whole
-    // millisecond — utimes can't always represent the source's sub-millisecond
-    // precision, and a dest mtime even fractionally older would defeat the
-    // skip-if-current check on every subsequent sync.
-    fs.utimesSync(dest, srcStat.atimeMs / 1000, Math.ceil(srcStat.mtimeMs) / 1000);
 }
 export function extractSessionIdFromPath(filePath) {
     // Extract session ID from Claude filename or Codex rollout filename.
@@ -196,7 +205,10 @@ export async function syncConversations(sourceDir, destDir, options = {}) {
                 const srcStat = fs.statSync(srcFile);
                 const needsCopy = !archiveIsCurrent(srcStat, destFile);
                 if (needsCopy) {
-                    filesToIndex.push({ src: srcFile, dest: destFile, srcStat, archiveAttempted: false, archived: false });
+                    const pending = { src: srcFile, dest: destFile, srcStat, archiveAttempted: false };
+                    copyToArchive(pending, pendingMtimeMs(srcStat));
+                    result.copied++;
+                    filesToIndex.push(pending);
                 }
                 else {
                     result.skipped++;
@@ -224,16 +236,14 @@ export async function syncConversations(sourceDir, destDir, options = {}) {
             }
         }
     }
-    // A file reaches the archive only after its exchanges are indexed, so a sync
-    // that stops part-way leaves every unfinished file to be indexed next time.
+    // A file's archive copy is marked current only after its index attempt, so a
+    // sync that stops part-way leaves every unfinished file to be indexed next time.
     const archivePending = (pending) => {
         if (pending.archiveAttempted)
             return;
         pending.archiveAttempted = true;
         try {
-            copyToArchive(pending);
-            pending.archived = true;
-            result.copied++;
+            copyToArchive(pending, currentMtimeMs(pending.srcStat));
         }
         catch (error) {
             result.errors.push({
@@ -247,8 +257,8 @@ export async function syncConversations(sourceDir, destDir, options = {}) {
         const { parseConversation } = await import('./parser.js');
         // Load the embedding backend first. It can fail on hosts where sharp's
         // native binding (pulled in transitively by @huggingface/transformers)
-        // can't dlopen libvips (#135). That must not abort the whole sync — the files still
-        // need archiving and summaries still need to run — so surface a
+        // can't dlopen libvips (#135). That must not abort the whole sync — copying
+        // has already happened and summaries still need to run — so surface a
         // clear, actionable error and skip semantic indexing for this run instead
         // of throwing out of syncConversations (which would crash the SessionStart
         // hook that invokes it).
@@ -277,7 +287,7 @@ export async function syncConversations(sourceDir, destDir, options = {}) {
                 try {
                     // Check for DO NOT INDEX marker
                     if (shouldSkipConversation(pending.src)) {
-                        continue; // Skip indexing; the finally clause still archives the file
+                        continue; // Skip indexing; the finally clause still marks the copy current
                     }
                     // High-water mark: index exchanges past the last line we've already
                     // covered. Transcript JSONLs are append-only, so MAX(line_end) tells
@@ -320,21 +330,17 @@ export async function syncConversations(sourceDir, destDir, options = {}) {
             db.close();
         }
     }
-    // Files not indexed this run (indexing skipped or unavailable) are still
-    // archived before summaries read them.
+    // Files not indexed this run (indexing skipped or unavailable) are marked
+    // current as well.
     for (const pending of filesToIndex)
         archivePending(pending);
     // Generate summaries for files that need them
-    // The summary pass reads the archive copy, so a file whose copy failed waits
-    // for the sync that archives it.
-    const unarchived = new Set(filesToIndex.filter(p => !p.archived).map(p => p.dest));
-    const summarizable = filesToSummarize.filter(f => !unarchived.has(f.path));
-    if (!options.skipSummaries && summarizable.length > 0) {
+    if (!options.skipSummaries && filesToSummarize.length > 0) {
         const { parseConversation } = await import('./parser.js');
         const { summarizeConversation, isAuthFailure } = await import('./summarizer.js');
         const summaryLimit = options.summaryLimit ?? 10;
-        const toSummarize = summarizable.slice(0, summaryLimit);
-        const remaining = summarizable.length - toSummarize.length;
+        const toSummarize = filesToSummarize.slice(0, summaryLimit);
+        const remaining = filesToSummarize.length - toSummarize.length;
         console.log(`Generating summaries for ${toSummarize.length} conversation(s)...`);
         if (remaining > 0) {
             console.log(`  (${remaining} more need summaries - will process on next sync)`);

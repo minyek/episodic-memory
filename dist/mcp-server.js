@@ -30560,12 +30560,12 @@ function initDatabase() {
 }
 
 // src/env-count.ts
-function parseEnvCount(name, raw, fallback, unit, warn) {
-  if (raw === void 0) return fallback;
+function parseEnvCount(raw, count, warn) {
+  if (raw === void 0) return count.fallback;
   if (raw === "0") return 0;
   if (/^[1-9][0-9]*$/.test(raw)) return Number.parseInt(raw, 10);
-  warn(`episodic-memory: ignoring invalid ${name}=${JSON.stringify(raw)}; using ${fallback} ${unit}`);
-  return fallback;
+  warn(`episodic-memory: ignoring invalid ${count.name}=${JSON.stringify(raw)}; using ${count.fallback} ${count.unit}`);
+  return count.fallback;
 }
 
 // src/embeddings.ts
@@ -30575,10 +30575,8 @@ var BGE_QUERY_PREFIX = "Represent this sentence for searching relevant passages:
 var DEFAULT_INTRA_OP_THREADS = 2;
 function resolveIntraOpThreads() {
   const threads = parseEnvCount(
-    "EPISODIC_MEMORY_EMBED_THREADS",
     process.env.EPISODIC_MEMORY_EMBED_THREADS,
-    DEFAULT_INTRA_OP_THREADS,
-    "threads",
+    { name: "EPISODIC_MEMORY_EMBED_THREADS", fallback: DEFAULT_INTRA_OP_THREADS, unit: "threads" },
     (message) => console.error(message)
   );
   return threads === 0 ? null : threads;

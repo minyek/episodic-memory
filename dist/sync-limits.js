@@ -2,7 +2,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { parseEnvCount } from './env-count.js';
-import { acquireFileLock, readLockHolder } from './file-lock.js';
+import { acquireFileLock, describeLockHolder, readLockHolder, } from './file-lock.js';
 /** Set by the parent of `sync --background` in the environment of the detached child. */
 export const BACKGROUND_CHILD_ENV = 'EPISODIC_MEMORY_BACKGROUND_CHILD';
 export const DEFAULT_SYNC_DEADLINE_MS = 30 * 60 * 1000;
@@ -16,10 +16,10 @@ const MAX_TIMER_MS = 2 ** 31 - 1;
  * remove the limit by accident.
  */
 export function resolveSyncDeadlineMs(raw, warn) {
-    const ms = parseEnvCount('EPISODIC_MEMORY_SYNC_TIMEOUT_MS', raw, DEFAULT_SYNC_DEADLINE_MS, 'ms', warn);
+    const ms = parseEnvCount(raw, { name: 'EPISODIC_MEMORY_SYNC_TIMEOUT_MS', fallback: DEFAULT_SYNC_DEADLINE_MS, unit: 'ms' }, warn);
     if (ms <= MAX_TIMER_MS)
         return ms;
-    warn(`episodic-memory: EPISODIC_MEMORY_SYNC_TIMEOUT_MS=${raw} is above the timer limit; using ${MAX_TIMER_MS} ms`);
+    warn(`episodic-memory: clamping EPISODIC_MEMORY_SYNC_TIMEOUT_MS=${JSON.stringify(raw)} to the timer limit; using ${MAX_TIMER_MS} ms`);
     return MAX_TIMER_MS;
 }
 /**
@@ -40,9 +40,7 @@ export function lowerBackgroundPriority(setPriority = os.setPriority) {
     try {
         setPriority(0, BACKGROUND_NICE);
     }
-    catch {
-        // Priority is a courtesy to other work, not a requirement for syncing.
-    }
+    catch { }
 }
 function isDirectory(dir) {
     if (!dir)
@@ -84,9 +82,6 @@ export function acquireUserSyncSlot(env, options = {}) {
         return { kind: 'unavailable', reason: error instanceof Error ? error.message : String(error) };
     }
 }
-function holderLabel(pid) {
-    return pid !== null ? `pid ${pid}` : 'another process';
-}
 /**
  * Limits for the detached child of `sync --background`: lower priority before
  * any embedding session exists, take the per-user lock, arm the deadline.
@@ -100,7 +95,7 @@ export function startBackgroundSyncLimits(env, hooks) {
     const slot = hooks.acquireSlot({
         onCompromised: (kind, holderPid) => {
             if (kind === 'taken-over') {
-                hooks.log(`episodic-memory: per-user sync lock taken over by ${holderLabel(holderPid)}; stopping`);
+                hooks.log(`episodic-memory: per-user sync lock taken over by ${describeLockHolder(holderPid)}; stopping`);
                 hooks.exit(0);
                 return;
             }
@@ -108,7 +103,7 @@ export function startBackgroundSyncLimits(env, hooks) {
         },
     });
     if (slot.kind === 'busy') {
-        hooks.log(`episodic-memory: another background sync is running for this user (${holderLabel(slot.holderPid)}); skipping`);
+        hooks.log(`episodic-memory: another background sync is running for this user (${describeLockHolder(slot.holderPid)}); skipping`);
         hooks.exit(0);
         return null;
     }

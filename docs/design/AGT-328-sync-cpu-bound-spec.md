@@ -34,7 +34,7 @@ cores for up to 7 hours (host load average 470). Cause, measured:
 | D5 | CPU priority of a background sync | none; nice 19; nice 10 | **nice 10**, background child only, called before any embedding session exists: on Linux a nice value belongs to a thread and only threads created after the call inherit it (measured: after `os.setPriority(10)` the onnxruntime worker and libuv threads had nice 10, the V8 platform threads created earlier kept 0). 19 would starve the summarizer subprocess (AGT-329 handles starvation separately). |
 | D6 | Cross-`HOME` limit | none; lock in `os.tmpdir()`; lock in `$XDG_RUNTIME_DIR` else `os.tmpdir()`; lock in the passwd home | **Approved by the user (U1, option b): `episodic-memory-sync-<uid>.lock` in `$XDG_RUNTIME_DIR` when it is set and a directory, else `os.tmpdir()`**, taken by the background child after its per-config-dir lock. `<uid>` is `process.getuid()` (`os.userInfo().username` where absent), so accounts that share a temp dir never share or squat it. Neither depends on `$HOME`. Every ARM job has its own `TMPDIR` (checked 2026-11-12: 190 of 201 ARM-job processes had `XDG_RUNTIME_DIR=/run/user/1001`; every one had a per-job `TMPDIR`), so `os.tmpdir()` alone would not be per user. macOS and Windows leave `XDG_RUNTIME_DIR` unset and their temp dir is already per user. Foreground `sync` and `index` do not take it. Cost: a scratch-`HOME` sync holding it makes the user's real background syncs skip until it ends (at most the deadline); a foreground sync still runs. |
 | D7 | New skip switch | add `SKIP_SYNC` | **None**: reuse DISABLE_AUTO_SYNC. |
-| D8 | Copy order in a sync | copy every file in the walk, then index (today); copy each file after its index attempt | **After its index attempt.** Today the walk copies every new or changed file (`sync.ts` 217-258) before indexing any (296-342), and the next sync skips a file whose archive copy is current (`copyIfNewer` 143-149): checked, an archived never-indexed conversation gives `Copied: 0, Skipped: 1, Indexed: 0`. The walk records each file that needs copying with the source mtime it saw. The index loop parses the source file with the archive path as `archivePath`, inserts its new exchanges, then copies it (temp file and rename, as now) and sets the copy's mtime to the source mtime recorded before parsing, so a source that grew meanwhile is copied again next time. It copies after a failed or DO-NOT-INDEX attempt too, as today. When indexing is skipped or the embedding backend is unavailable, the walk's files are copied before summaries, as now. The summary queue checks the DO-NOT-INDEX marker on the source file while its archive copy does not exist yet, and a file whose copy failed is not summarized. Cost: a file reaches the archive only when its index attempt runs, so a backlog larger than one deadline's indexing reaches the archive over several syncs, and a source deleted before its turn (Claude Code's `cleanupPeriodDays`, a user deleting a transcript) is never archived; today's order would have kept it. |
+| D8 | Copy order in a sync | copy every file in the walk, then index (today); copy each file after its index attempt; copy in the walk stamped 1 ms older than its source, then stamp it current after the index attempt | **Copy in the walk, stamp current after the index attempt.** Today the walk copies every new or changed file (`sync.ts` 217-258) before indexing any (296-342), and the next sync skips a file whose archive copy is current (`copyIfNewer` 143-149): checked, an archived never-indexed conversation gives `Copied: 0, Skipped: 1, Indexed: 0`, so a hard stop would lose its index. Copying only after the index attempt (the first version of this decision) fixed that but lost data: a sync that stops before a file's turn leaves it unarchived, and a source deleted by Claude Code's `cleanupPeriodDays` before the next sync is gone for good (checked by the final review's probe: main keeps it, that version did not). The walk now copies each new or changed file stamped 1 ms older than its source mtime, so the next sync still sees it as needing an index; after the file's index attempt (success, failure or DO-NOT-INDEX) the copy is rewritten and stamped with the source mtime recorded before parsing, so a source that grew meanwhile is copied again next time. When indexing is skipped or the embedding backend is unavailable, the pending copies are stamped current before summaries. The DO-NOT-INDEX marker is read from the source file. A file whose later refresh copy fails keeps its walk copy and the failure is reported once. Cost: each new or changed file is copied twice in a sync. |
 | D9 | A held per-user lock found compromised | throw from the timer (proper-lockfile default, today); continue; stop | **Stop when taken over, continue when it vanished.** `acquireFileLock` accepts an `onCompromised` handler. When the lock directory exists with an mtime not its own (another sync took it), the child logs a warn line naming the new holder's PID and exits 0 after releasing its per-config-dir lock (Inv 1). When the directory is gone (ENOENT, a cleaned temp dir), it logs a warn line and continues under its per-config-dir lock and the deadline (Inv 5). The per-config-dir lock keeps today's behaviour. Today's default throws from a timer (`proper-lockfile/lib/lockfile.js` 120-139, 200, 213). |
 
 ## Acceptance criteria
@@ -58,9 +58,11 @@ cores for up to 7 hours (host load average 470). Cause, measured:
 7. README documents the new default, `EPISODIC_MEMORY_SYNC_TIMEOUT_MS` and the per-user lock.
 8. Acceptance run under `arm-run`: a background sync child over a copy of 200 real conversations, with an isolated config dir
    and lock root and `EPISODIC_MEMORY_SKIP_SUMMARIES=1`, averages at most 2.5 cores over the indexing window. Sampled once a second
-   over that window, the median count of threads in state R is at most 2, no sample shows more than 6 (the model-load and file-read
-   helper threads), the process has at most 12 threads (42 before), and every thread has nice 10. With
-   `EPISODIC_MEMORY_SYNC_TIMEOUT_MS=120000` it exits 124 with the warn line and leaves no lock directory. A second run
+   over that window, the median count of threads in state R is at most 2, no sample shows more than 6 (model-load and file-read
+   helper threads), and the process has at most 12 threads (42 before). Started at nice 0 outside `arm-run` (whose CPU guard
+   renices every job to `JOB_NICE`, 10 on this host), the main thread, the libuv pool and the onnxruntime worker have nice 10; the
+   V8 platform threads created at start-up keep nice 0 (D5). With `EPISODIC_MEMORY_SYNC_TIMEOUT_MS` shorter than the indexing window
+   (20000 in the recorded run, which indexed the corpus in 46 s) it exits 124 with the warn line and leaves no lock directory. A second run
    without the deadline finishes the index: the distinct `archive_path` count in `exchanges` equals the number of indexable conversations.
 
 ## Invariants
@@ -68,7 +70,7 @@ cores for up to 7 hours (host load average 470). Cause, measured:
 1. At most one background sync continues past its next heartbeat while holding the per-user lock (a taken-over holder stops, D9).
 2. A process that exits (normal, signal or deadline) releases both locks it holds, and never deletes a successor's PID file.
 3. After a deadline exit, the next sync indexes every exchange the interrupted sync did not: a file's archive copy is brought
-   up to date only after its exchanges are inserted or its index attempt failed, and the high-water mark resumes a partly indexed file.
+   stamped current only after its exchanges are inserted or its index attempt failed (until then it is stamped older than its source and is archived but pending), and the high-water mark resumes a partly indexed file.
 4. The deadline timer and nice setting never apply to a foreground sync.
 5. A lock error other than contention never stops a sync, and a lock that vanished never throws from a timer.
 
@@ -86,6 +88,15 @@ cores for up to 7 hours (host load average 470). Cause, measured:
 | running | per-user lock directory removed | | running (per-config-dir lock only) | warn line |
 | running | done / SIGTERM / SIGINT / SIGHUP | | exit | release locks |
 
+Archive copy of one conversation:
+
+| State | Event | Guard | Next state | Side effect |
+|---|---|---|---|---|
+| absent or older than the source | walk | | pending (copy stamped 1 ms older than the source) | W7 |
+| pending | index attempt ends, or indexing skipped | | current | W8 |
+| pending | the sync stops | | pending | the next sync indexes it |
+| any | source removed | | unchanged | the copy is kept |
+
 ## Writers
 
 | # | Writer | Reads | Writes | Write rule | Gaps |
@@ -96,6 +107,8 @@ cores for up to 7 hours (host load average 470). Cause, measured:
 | W4 | background sync child, per-config-dir lock | as W1 | as W1 | as W1 | G1, G2, G3 |
 | W5 | foreground `sync` (no child marker), per-config-dir lock | as W4 | as W4 | as W4 | as W4 |
 | W6 | `index-cli` (every command), per-config-dir lock | as W4 | as W4 | as W4 | as W4 |
+| W7 | the sync walk (in W4 and W5) writing an archive copy | source and archive mtimes (`archiveIsCurrent`) | archive file, stamped 1 ms older than its source (pending) | temp file and rename | none across processes: every writer of one archive, `indexer.ts`'s missing-file copy included, holds the per-config-dir lock |
+| W8 | the sync after a file's index attempt, or before summaries when indexing is skipped (in W4 and W5) | the recorded source stat | archive file, stamped with the recorded source mtime (current) | temp file and rename | a stop between W7 and W8 leaves the copy pending; the next sync indexes it |
 
 No guarded reader: `readLockHolder` only prints the PID it reads. G1 stays: the busy line may name the previous holder.
 G2 and G3 are proper-lockfile's own: the loser finds its lock compromised at its next heartbeat, within 5 minutes, and acts as D9 says.
@@ -111,10 +124,11 @@ The CPU and thread-state measurement of AC 8 needs a real model load and a real 
 |---|---|
 | 1 | `test/embed-threads.test.ts` (updated: default is 2 everywhere; empty and non-numeric keep 2); `buildEmbeddingSessionOptions` cases in the same file; `test/embeddings-session-options.test.ts` (the pipeline receives them) |
 | 2 | `test/sync-limits.test.ts` (parse, clamp above the timer limit, timer fires and is unref'd); `test/sync-cli-background.test.ts` (exit 124 at the deadline with both lock directories gone; a foreground sync with the same deadline completes) |
-| 3 | `test/sync-limits.test.ts`: `lowerBackgroundPriority` with an injected `setPriority`, and `startBackgroundSyncLimits` with injected hooks (priority first, then lock, then deadline; none for a foreground sync); `test/sync-cli-background.test.ts` (priority set before the sync starts; none in the foreground); thread nice values by the AC 8 run |
+| 3 | `test/sync-limits.test.ts`: `lowerBackgroundPriority` with an injected `setPriority`, and `startBackgroundSyncLimits` with injected hooks (priority first, then lock, then deadline; none for a foreground sync); `test/sync-cli-background.test.ts` (priority set before the sync starts; none in the foreground); thread nice values by AC 8's nice-0 run |
 | 4, 5 | `test/sync-global-lock.test.ts`: the test takes the per-user lock with `acquireFileLock` on the resolved path, then runs `dist/sync-cli.js` with the child marker, its own `HOME` and `EPISODIC_MEMORY_CONFIG_DIR`, a different `TMPDIR` and the shared lock root. It asserts exit 0, no copy, and output naming the test's pid. A foreground run with the same env syncs. With an unwritable lock root the child logs a warn line and syncs |
 | 6, Inv 3 | `test/sync-deadline-resume.test.ts`: `syncConversations` over three files with an embedder that never resolves on the second file's first exchange; the test abandons that run, as a hard exit would, then runs a second sync with a working embedder and asserts every exchange of all three files is indexed once and all three archive copies exist. On today's code the second sync indexes neither the second nor the third file |
 | Inv 1, 2, 5 | `test/sync-user-lock-interleaving.test.ts`: `acquireFileLock` takes an injected `fs` (proper-lockfile's `fs` option) and update interval. Two acquirers of a stale per-user lock, each held between its `stat` and its `rmdir` (G2) while the other runs; a holder held between `stat` and `utimes` (G3) while a stealer runs; a releaser held between its PID-file unlink and its `rmdir` while a contender acquires. After each step: at most one process continues past its next heartbeat (Inv 1), the PID file names the live holder, and a compromised holder acts as D9 says instead of throwing (Inv 5) |
+| Safety (standing) | `test/sync-deadline-resume.test.ts`: a conversation whose source is removed after a run abandoned mid-index stays in the archive; `test/sync-archive-failure.test.ts`: a source removed during its index keeps the walk copy and the failed refresh is reported once |
 | 7 | review reads the README |
 | 8 | recorded acceptance run |
 

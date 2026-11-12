@@ -102,3 +102,7 @@ export function readLockHolder(lockPath) {
         return null;
     }
 }
+/** Names a lock's holder in a diagnostic line: its PID, or "another process" when no PID was recorded. */
+export function describeLockHolder(pid) {
+    return pid !== null ? `pid ${pid}` : 'another process';
+}

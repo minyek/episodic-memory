@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import { mkdtempSync, rmSync, mkdirSync, utimesSync, existsSync, readFileSync, writeFileSync } from 'fs';
-import { join } from 'path';
+import { join, dirname } from 'path';
 import { spawnSync } from 'child_process';
-import { pathToFileURL } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import { tmpdir } from 'os';
 import { acquireFileLock, releaseFileLock, type FileLockHandle, type CompromiseKind } from '../src/file-lock.js';
 
@@ -73,10 +73,6 @@ describe('per-user lock under interleaved acquirers (spec Inv 1, 2, 5)', () => {
     utimesSync(`${lockPath}.lock`, old, old);
   }
 
-  function track(onKind: (k: CompromiseKind) => void) {
-    return (kind: CompromiseKind) => onKind(kind);
-  }
-
   // G2: two stealers of a stale lock. The first is paused between noticing the
   // lock is stale and removing it; the second completes its steal there; the
   // first then removes the second's fresh lock and takes its own. Both now
@@ -98,12 +94,12 @@ describe('per-user lock under interleaved acquirers (spec Inv 1, 2, 5)', () => {
           injected = true;
           second = acquireFileLock(lockPath, {
             ...FAST,
-            onCompromised: track((k) => { compromised.second.push(k); signal(); }),
+            onCompromised: (k) => { compromised.second.push(k); signal(); },
           });
           letClockAdvance();
         }
       }),
-      onCompromised: track((k) => { compromised.first.push(k); signal(); }),
+      onCompromised: (k) => { compromised.first.push(k); signal(); },
     });
     if (first) held.push(first);
     if (second) held.push(second);
@@ -138,12 +134,12 @@ describe('per-user lock under interleaved acquirers (spec Inv 1, 2, 5)', () => {
           utimesSync(`${lockPath}.lock`, old, old);
           stealer = acquireFileLock(lockPath, {
             ...FAST,
-            onCompromised: track((k) => { compromised.stealer.push(k); signalStealer(k); }),
+            onCompromised: (k) => { compromised.stealer.push(k); signalStealer(k); },
           });
           letClockAdvance();
         }
       }),
-      onCompromised: track((k) => compromised.holder.push(k)),
+      onCompromised: (k) => compromised.holder.push(k),
     });
     holderHasAcquired = true;
     if (holder) held.push(holder);
@@ -177,6 +173,27 @@ describe('per-user lock under interleaved acquirers (spec Inv 1, 2, 5)', () => {
     expect(readFileSync(lockPath, 'utf-8').trim()).toBe(String(process.pid));
   });
 
+  // Inv 1 and 2: a holder stopped by a takeover releases on its way out; the
+  // release leaves the successor's lock directory and PID file in place.
+  it('leaves the successor\'s lock in place when a taken-over holder releases', async () => {
+    let signal!: () => void;
+    const takenOver = new Promise<void>((resolve) => { signal = resolve; });
+    const handle = acquireFileLock(lockPath, { ...FAST, onCompromised: () => signal() });
+    expect(handle).not.toBeNull();
+
+    rmSync(`${lockPath}.lock`, { recursive: true });
+    mkdirSync(`${lockPath}.lock`);
+    const later = new Date(Date.now() + 5000);
+    utimesSync(`${lockPath}.lock`, later, later);
+    writeFileSync(lockPath, '424242');
+    await takenOver;
+
+    releaseFileLock(handle!);
+
+    expect(existsSync(`${lockPath}.lock`)).toBe(true);
+    expect(readFileSync(lockPath, 'utf-8')).toBe('424242');
+  });
+
   // Inv 5: a lock directory removed while held (a cleaned temp dir) is
   // reported as "vanished" and never thrown from the heartbeat timer.
   it('reports a vanished lock directory instead of throwing', async () => {
@@ -198,7 +215,7 @@ describe('per-user lock under interleaved acquirers (spec Inv 1, 2, 5)', () => {
   // D9: only the per-user lock handles a lost lock. A lock taken without a
   // handler keeps the library's behaviour: its holder stops after a takeover.
   it('stops a holder that gave no handler when its lock is taken over', () => {
-    const fileLockUrl = pathToFileURL(join(process.cwd(), 'dist', 'file-lock.js')).href;
+    const fileLockUrl = pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), '..', 'dist', 'file-lock.js')).href;
     const lockDir = `${lockPath}.lock`;
     const script = `
       import fs from 'fs';

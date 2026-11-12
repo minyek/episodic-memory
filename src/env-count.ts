@@ -3,16 +3,16 @@
  * fallback; exactly "0" gives 0; a positive integer is taken as is; anything
  * else keeps the fallback and warns, so a malformed value never turns a limit off.
  */
-export function parseEnvCount(
-  name: string,
-  raw: string | undefined,
-  fallback: number,
-  unit: string,
-  warn: (message: string) => void,
-): number {
-  if (raw === undefined) return fallback;
+export interface EnvCount {
+  name: string;
+  fallback: number;
+  unit: string;
+}
+
+export function parseEnvCount(raw: string | undefined, count: EnvCount, warn: (message: string) => void): number {
+  if (raw === undefined) return count.fallback;
   if (raw === '0') return 0;
   if (/^[1-9][0-9]*$/.test(raw)) return Number.parseInt(raw, 10);
-  warn(`episodic-memory: ignoring invalid ${name}=${JSON.stringify(raw)}; using ${fallback} ${unit}`);
-  return fallback;
+  warn(`episodic-memory: ignoring invalid ${count.name}=${JSON.stringify(raw)}; using ${count.fallback} ${count.unit}`);
+  return count.fallback;
 }

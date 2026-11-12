@@ -29,8 +29,8 @@ vi.mock('../src/summarizer.js', async (importOriginal) => ({
 
 import { syncConversations } from '../src/sync.js';
 
-// Behaviour: a file whose archive copy failed is reported once and is not
-// summarized from a missing archive file.
+// Behaviour: a source removed while it is being indexed keeps the copy the walk
+// archived, and the failed refresh of that copy is reported once.
 describe('sync when the archive copy fails', () => {
   let testDir: string;
   let restoreConsole: () => void;
@@ -49,7 +49,7 @@ describe('sync when the archive copy fails', () => {
     rmSync(testDir, { recursive: true, force: true });
   });
 
-  it('reports the copy failure once and does not queue a summary for the missing file', async () => {
+  it('keeps the walk copy of a source removed during indexing and reports the failed refresh once', async () => {
     const id = '44444444-4444-4444-8444-444444444444';
     const sourceDir = join(testDir, 'projects');
     const destDir = join(testDir, 'archive');
@@ -63,7 +63,6 @@ describe('sync when the archive copy fails', () => {
     const result = await syncConversations(sourceDir, destDir, {});
 
     expect(result.errors.filter(e => e.error.includes('copyfile'))).toHaveLength(1);
-    expect(summarizeConversation).not.toHaveBeenCalled();
-    expect(existsSync(join(destDir, 'proj', `${id}-summary.txt`))).toBe(false);
+    expect(existsSync(join(destDir, 'proj', `${id}.jsonl`))).toBe(true);
   });
 });
