@@ -57,8 +57,9 @@ cores for up to 7 hours (host load average 470). Cause, measured:
 6. After a deadline exit, the next sync indexes every exchange the interrupted sync did not (D8).
 7. README documents the new default, `EPISODIC_MEMORY_SYNC_TIMEOUT_MS` and the per-user lock.
 8. Acceptance run under `arm-run`: a background sync child over a copy of 200 real conversations, with an isolated config dir
-   and lock root and `EPISODIC_MEMORY_SKIP_SUMMARIES=1`, averages at most 2.5 cores over 60 s of indexing. Sampled once a second
-   over that window, at most 3 of its threads are in state R and every thread onnxruntime created has nice 10. With
+   and lock root and `EPISODIC_MEMORY_SKIP_SUMMARIES=1`, averages at most 2.5 cores over the indexing window. Sampled once a second
+   over that window, the median count of threads in state R is at most 2, no sample shows more than 6 (the model-load and file-read
+   helper threads), the process has at most 12 threads (42 before), and every thread has nice 10. With
    `EPISODIC_MEMORY_SYNC_TIMEOUT_MS=120000` it exits 124 with the warn line and leaves no lock directory. A second run
    without the deadline finishes the index: the distinct `archive_path` count in `exchanges` equals the number of indexable conversations.
 
