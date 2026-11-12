@@ -1,0 +1,216 @@
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import fs from 'fs';
+import { mkdtempSync, rmSync, mkdirSync, utimesSync, existsSync, readFileSync, writeFileSync } from 'fs';
+import { join } from 'path';
+import { tmpdir } from 'os';
+import { acquireFileLock, releaseFileLock, type FileLockHandle, type CompromiseKind } from '../src/file-lock.js';
+
+// Behaviour (spec invariants 1, 2 and 5): at most one holder of a lock keeps
+// running past its next heartbeat; releasing never deletes a successor's PID
+// file; a lock that vanished or was taken over never throws from a timer.
+//
+// The lock library's stale-steal and heartbeat are several separate
+// filesystem calls. Each scenario pauses one party between two of its calls
+// (an injected fs runs a hook at that point) and runs the other party to
+// completion there, then checks the outcome after the next heartbeat.
+
+type FsHook = (method: string, phase: 'before' | 'after' | 'error') => void;
+
+function hookedFs(hook: FsHook) {
+  const wrap = <T extends (...a: any[]) => any>(name: string, fn: T) =>
+    ((...args: any[]) => {
+      hook(name, 'before');
+      let out;
+      try {
+        out = fn(...args);
+      } catch (error) {
+        hook(name, 'error');
+        throw error;
+      }
+      hook(name, 'after');
+      return out;
+    }) as T;
+  return {
+    ...fs,
+    mkdirSync: wrap('mkdirSync', fs.mkdirSync),
+    statSync: wrap('statSync', fs.statSync),
+    rmdirSync: wrap('rmdirSync', fs.rmdirSync),
+    utimesSync: wrap('utimesSync', fs.utimesSync),
+  };
+}
+
+// The kernel's coarse timestamps can give two directories created in quick
+// succession the same mtime, which hides a takeover from the heartbeat.
+function letClockAdvance(): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+}
+
+const FAST = { stale: 2000, update: 1000 };
+
+describe('per-user lock under interleaved acquirers (spec Inv 1, 2, 5)', () => {
+  let dir: string;
+  let lockPath: string;
+  const held: FileLockHandle[] = [];
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'episodic-memory-lock-interleave-'));
+    lockPath = join(dir, 'user.lock');
+  });
+
+  afterEach(() => {
+    for (const h of held.splice(0)) {
+      try { releaseFileLock(h); } catch {}
+    }
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function makeStaleLock(): void {
+    mkdirSync(`${lockPath}.lock`);
+    writeFileSync(lockPath, '999999');
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(`${lockPath}.lock`, old, old);
+  }
+
+  function track(onKind: (k: CompromiseKind) => void) {
+    return (kind: CompromiseKind) => onKind(kind);
+  }
+
+  // G2: two stealers of a stale lock. The first is paused between noticing the
+  // lock is stale and removing it; the second completes its steal there; the
+  // first then removes the second's fresh lock and takes its own.
+  it('stops the stealer that lost when two stealers both acquire a stale lock', async () => {
+    makeStaleLock();
+    const compromised: Record<string, CompromiseKind[]> = { first: [], second: [] };
+    let signalSecond!: (k: CompromiseKind) => void;
+    const secondCompromised = new Promise<CompromiseKind>((resolve) => { signalSecond = resolve; });
+
+    let second: FileLockHandle | null = null;
+    let injected = false;
+    const first = acquireFileLock(lockPath, {
+      ...FAST,
+      fs: hookedFs((method, phase) => {
+        if (method === 'rmdirSync' && phase === 'before' && !injected) {
+          injected = true;
+          second = acquireFileLock(lockPath, {
+            ...FAST,
+            onCompromised: track((k) => { compromised.second.push(k); signalSecond(k); }),
+          });
+          letClockAdvance();
+        }
+      }),
+      onCompromised: track((k) => compromised.first.push(k)),
+    });
+    if (first) held.push(first);
+    if (second) held.push(second);
+
+    expect(first).not.toBeNull();
+    expect(second).not.toBeNull();
+
+    // Both believe they hold the lock until a heartbeat runs; the one whose
+    // lock was replaced finds it is no longer its own.
+    expect(await secondCompromised).toBe('taken-over');
+    expect(compromised.first).toEqual([]);
+    expect(compromised.second).toEqual(['taken-over']);
+  });
+
+  // G3: the holder is paused between checking its lock is still its own and
+  // refreshing it; a stealer finds the lock stale and takes it meanwhile.
+  it('stops the stealer, not the refreshing holder, when a steal lands inside a heartbeat', async () => {
+    const compromised: Record<string, CompromiseKind[]> = { holder: [], stealer: [] };
+    let signalStealer!: (k: CompromiseKind) => void;
+    const stealerCompromised = new Promise<CompromiseKind>((resolve) => { signalStealer = resolve; });
+
+    let stealer: FileLockHandle | null = null;
+    let holderHasAcquired = false;
+    let injected = false;
+    const holder = acquireFileLock(lockPath, {
+      ...FAST,
+      fs: hookedFs((method, phase) => {
+        // Only the heartbeat's refresh (after acquire has returned) is paused
+        // here, not the timestamp probe the library makes while acquiring.
+        if (method === 'utimesSync' && phase === 'before' && holderHasAcquired && !injected) {
+          injected = true;
+          const old = new Date(Date.now() - 60_000);
+          utimesSync(`${lockPath}.lock`, old, old);
+          stealer = acquireFileLock(lockPath, {
+            ...FAST,
+            onCompromised: track((k) => { compromised.stealer.push(k); signalStealer(k); }),
+          });
+          letClockAdvance();
+        }
+      }),
+      onCompromised: track((k) => compromised.holder.push(k)),
+    });
+    holderHasAcquired = true;
+    if (holder) held.push(holder);
+    expect(holder).not.toBeNull();
+
+    expect(await stealerCompromised).toBe('taken-over');
+    if (stealer) held.push(stealer);
+    expect(compromised.holder).toEqual([]);
+    expect(compromised.stealer).toEqual(['taken-over']);
+  });
+
+  // W3: a releaser removes its own PID file before it removes the lock
+  // directory, so a successor that acquires the instant the directory goes
+  // keeps its PID file.
+  it('leaves a successor\'s PID file in place when it acquires the moment the lock is released', () => {
+    let successor: FileLockHandle | null = null;
+    const releaser = acquireFileLock(lockPath, {
+      fs: hookedFs((method, phase) => {
+        if (method === 'rmdirSync' && phase === 'after' && successor === null) {
+          successor = acquireFileLock(lockPath);
+        }
+      }),
+    });
+    expect(releaser).not.toBeNull();
+
+    releaseFileLock(releaser!);
+
+    expect(successor).not.toBeNull();
+    held.push(successor!);
+    expect(existsSync(lockPath)).toBe(true);
+    expect(readFileSync(lockPath, 'utf-8').trim()).toBe(String(process.pid));
+  });
+
+  // Inv 5: a lock directory removed while held (a cleaned temp dir) is
+  // reported as "vanished" and never thrown from the heartbeat timer.
+  it('reports a vanished lock directory instead of throwing', async () => {
+    const kinds: CompromiseKind[] = [];
+    let signal!: (k: CompromiseKind) => void;
+    const reported = new Promise<CompromiseKind>((resolve) => { signal = resolve; });
+    const handle = acquireFileLock(lockPath, {
+      ...FAST,
+      onCompromised: (k) => { kinds.push(k); signal(k); },
+    });
+    held.push(handle!);
+
+    rmSync(`${lockPath}.lock`, { recursive: true, force: true });
+
+    expect(await reported).toBe('vanished');
+    expect(kinds).toEqual(['vanished']);
+  });
+
+  it('does not throw from the timer when a lock is compromised and no handler was given', async () => {
+    let signal!: () => void;
+    const heartbeatFoundIt = new Promise<void>((resolve) => { signal = resolve; });
+    const handle = acquireFileLock(lockPath, {
+      ...FAST,
+      fs: hookedFs((method, phase) => {
+        if (method === 'statSync' && phase === 'error') signal();
+      }),
+    });
+    held.push(handle!);
+    const uncaught: unknown[] = [];
+    const listener = (e: unknown) => uncaught.push(e);
+    process.on('uncaughtException', listener);
+    try {
+      rmSync(`${lockPath}.lock`, { recursive: true, force: true });
+      await heartbeatFoundIt;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(uncaught).toEqual([]);
+    } finally {
+      process.off('uncaughtException', listener);
+    }
+  });
+});
