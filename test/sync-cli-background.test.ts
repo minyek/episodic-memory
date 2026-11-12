@@ -81,7 +81,8 @@ describe('sync-cli background child limits', () => {
     expect(result.status).toBe(0);
     const log = readFileSync(events, 'utf-8').split('\n');
     const priority = log.indexOf('setPriority:0:10');
-    const syncStart = log.findIndex(line => line.startsWith('log:Syncing conversations'));
+    // The first line the sync prints marks its start.
+    const syncStart = log.findIndex(line => line.startsWith('log:'));
     expect(priority).toBeGreaterThanOrEqual(0);
     expect(syncStart).toBeGreaterThan(priority);
   });

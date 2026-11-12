@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import fs, { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, appendFileSync, utimesSync } from 'fs';
+import fs, { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, appendFileSync, utimesSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import Database from 'better-sqlite3';
@@ -13,10 +13,11 @@ const embedState = vi.hoisted(() => ({
   reachedHang: null as null | (() => void),
   embedded: [] as string[],
   onEmbed: null as null | ((user: string) => void),
+  initFails: false,
 }));
 
 vi.mock('../src/embeddings.js', () => ({
-  initEmbeddings: async () => {},
+  initEmbeddings: async () => { if (embedState.initFails) throw new Error('libvips missing'); },
   generateExchangeEmbedding: async (user: string) => {
     if (embedState.hangOn && user.includes(embedState.hangOn)) {
       embedState.reachedHang?.();
@@ -76,6 +77,7 @@ describe('sync resumes after an interrupted index run', () => {
     embedState.reachedHang = null;
     embedState.embedded = [];
     embedState.onEmbed = null;
+    embedState.initFails = false;
     restoreConsole = suppressConsole();
   });
 
@@ -187,13 +189,77 @@ describe('sync resumes after an interrupted index run', () => {
     expect(rows.map(r => r.n)).toEqual([1, 1, 1]);
   });
 
-  // D8: when no pending stamp reads back below the source, the copy is
-  // reported, because a stop before its index would leave it unindexed.
-  it('reports each copy whose pending stamp the filesystem cannot keep below its source', async () => {
-    storeFileTimesAs(() => 4_102_444_800); // 2100-01-01: no stamp reads back below the source
+  // Standing safety and Inv 3: an archive filesystem that refuses to set file
+  // times still gets every conversation archived, a deadline exit on it is
+  // resumed, and no temp copy is left behind.
+  it('resumes an abandoned run on an archive filesystem that refuses to set file times', async () => {
+    const real = fs.utimesSync;
+    vi.spyOn(fs, 'utimesSync').mockImplementation(((p: fs.PathLike, a: fs.TimeLike, m: fs.TimeLike) => {
+      if (String(p).startsWith(destDir)) throw Object.assign(new Error('EPERM: operation not permitted, utime'), { code: 'EPERM' });
+      return real(p, a, m);
+    }) as typeof fs.utimesSync);
+    embedState.hangOn = 'bravo-two';
+    const reached = new Promise<void>((resolve) => { embedState.reachedHang = resolve; });
+    void syncConversations(sourceDir, destDir, { skipSummaries: true });
+    await reached;
+
+    embedState.hangOn = null;
+    embedState.reachedHang = null;
+    const result = await syncConversations(sourceDir, destDir, { skipSummaries: true });
+
+    const db = new Database(dbPath, { readonly: true });
+    const rows = db.prepare('SELECT archive_path, COUNT(*) AS n FROM exchanges GROUP BY archive_path').all() as Array<{ n: number }>;
+    db.close();
+    expect(rows.map(r => r.n)).toEqual([1, 1, 1]);
+    expect(readdirSync(join(destDir, 'proj')).filter(name => name.includes('.tmp.'))).toEqual([]);
+    expect(result.indexed).toBeGreaterThan(0);
+  });
+
+  it('archives and indexes every conversation, and reports each copy, when the archive filesystem refuses to set file times', async () => {
+    vi.spyOn(fs, 'utimesSync').mockImplementation(((p: fs.PathLike) => {
+      if (String(p).startsWith(destDir)) throw Object.assign(new Error('EPERM: operation not permitted, utime'), { code: 'EPERM' });
+    }) as typeof fs.utimesSync);
     const result = await syncConversations(sourceDir, destDir, { skipSummaries: true });
 
     expect(result.indexed).toBe(3);
-    expect(result.errors.map(e => e.file).sort()).toEqual(files.map(f => join(sourceDir, 'proj', `${f.id}.jsonl`)).sort());
+    for (const f of files) expect(existsSync(join(destDir, 'proj', `${f.id}.jsonl`))).toBe(true);
+    expect(readdirSync(join(destDir, 'proj')).filter(name => name.includes('.tmp.'))).toEqual([]);
+    expect(new Set(result.errors.map(e => e.file))).toEqual(new Set(files.map(f => join(sourceDir, 'proj', `${f.id}.jsonl`))));
+  });
+
+  // Copies made while the embedding backend was unavailable stay recorded as
+  // not indexed, so the next sync indexes them.
+  it('indexes on the next sync the copies made while the embedding backend was unavailable', async () => {
+    embedState.initFails = true;
+    await syncConversations(sourceDir, destDir, { skipSummaries: true });
+    embedState.initFails = false;
+    await syncConversations(sourceDir, destDir, { skipSummaries: true });
+
+    const db = new Database(dbPath, { readonly: true });
+    const rows = db.prepare('SELECT archive_path, COUNT(*) AS n FROM exchanges GROUP BY archive_path').all() as Array<{ n: number }>;
+    db.close();
+    expect(rows.map(r => r.n)).toEqual([1, 1, 1]);
+  });
+
+  it('archives every conversation and resolves when the index database cannot be opened', async () => {
+    process.env.TEST_DB_PATH = testDir; // a directory: opening it fails
+    const result = await syncConversations(sourceDir, destDir, { skipSummaries: true });
+
+    for (const f of files) expect(existsSync(join(destDir, 'proj', `${f.id}.jsonl`))).toBe(true);
+    expect(result.errors.some(e => e.file === '(index database)')).toBe(true);
+  });
+
+  // A finished index attempt clears the file's pending record; a record that
+  // stayed would make every later sync read the file again.
+  it('leaves no pending record after an uninterrupted run, so a second run reads nothing again', async () => {
+    await syncConversations(sourceDir, destDir, { skipSummaries: true });
+    const embeddedAfterFirst = embedState.embedded.length;
+    await syncConversations(sourceDir, destDir, { skipSummaries: true });
+
+    const db = new Database(dbPath, { readonly: true });
+    const pending = db.prepare('SELECT COUNT(*) AS n FROM pending_index').get() as { n: number };
+    db.close();
+    expect(pending.n).toBe(0);
+    expect(embedState.embedded.length).toBe(embeddedAfterFirst);
   });
 });

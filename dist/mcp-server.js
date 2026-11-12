@@ -30531,6 +30531,11 @@ function initDatabase() {
       embedding FLOAT[384]
     )
   `);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS pending_index (
+      archive_path TEXT PRIMARY KEY
+    )
+  `);
   migrateSchema(db);
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_timestamp ON exchanges(timestamp DESC)

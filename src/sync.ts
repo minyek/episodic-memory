@@ -1,6 +1,5 @@
 import fs from 'fs';
 import path from 'path';
-import { currentArchiveMtimeMs, settlePendingMtime } from './archive-stamp.js';
 import { StringDecoder } from 'string_decoder';
 import { SUMMARIZER_CONTEXT_MARKER } from './constants.js';
 import { getExcludedProjects, findJsonlFiles, statIfExists } from './paths.js';
@@ -133,30 +132,20 @@ export function buildSyncOptionsFromEnv(env: NodeJS.ProcessEnv): SyncOptions {
   return { skipSummaries: env.EPISODIC_MEMORY_SKIP_SUMMARIES === '1' };
 }
 
-interface PendingArchiveCopy {
-  src: string;
-  dest: string;
-  // The source's timestamps as seen when the walk found it. The archive copy
-  // takes the mtime recorded here, so a source that grows while it is being
-  // indexed still looks newer than its copy and is picked up again.
-  srcStat: fs.Stats;
-  markCurrentAttempted: boolean;
-}
-
 function archiveIsCurrent(srcStat: fs.Stats, dest: string): boolean {
   if (!fs.existsSync(dest)) return false;
   return fs.statSync(dest).mtimeMs >= srcStat.mtimeMs;
 }
 
-// Copies the source into the archive stamped just below its mtime (pending),
-// so a sync that stops before the file's index turn leaves it for the next sync
-// to index. The temp file is stamped before the rename, so the archive never
-// holds a fresh copy that looks current. The stamp follows the source's mtime
-// because harnesses without per-message timestamps (Cursor agent transcripts)
-// fall back to the file's mtime. Returns false when no stamp reads back below
-// the source.
-function copyToArchive(pending: PendingArchiveCopy): boolean {
-  const { src, dest, srcStat } = pending;
+// Copies the source into the archive (temp file and rename), stamped with the
+// source mtime the walk saw: harnesses without per-message timestamps (Cursor
+// agent transcripts) fall back to the file's mtime, and a source that grows
+// after the walk still looks newer than its copy. Rounded up to a whole
+// millisecond: utimes can't always represent the source's sub-millisecond
+// precision, and a copy even fractionally older would be copied again on every
+// sync. A filesystem that refuses the stamp still gets the copy; the stamp
+// error is returned for the caller to report.
+function copyToArchive(src: string, dest: string, srcStat: fs.Stats): unknown {
   const destDir = path.dirname(dest);
   if (!fs.existsSync(destDir)) {
     fs.mkdirSync(destDir, { recursive: true });
@@ -164,21 +153,14 @@ function copyToArchive(pending: PendingArchiveCopy): boolean {
 
   const tempDest = dest + '.tmp.' + process.pid;
   fs.copyFileSync(src, tempDest);
-  const pendingMtimeMs = settlePendingMtime(srcStat.mtimeMs, mtimeMs => {
-    fs.utimesSync(tempDest, srcStat.atimeMs / 1000, mtimeMs / 1000);
-    return fs.statSync(tempDest).mtimeMs;
-  });
+  let stampError: unknown = null;
+  try {
+    fs.utimesSync(tempDest, srcStat.atimeMs / 1000, Math.ceil(srcStat.mtimeMs) / 1000);
+  } catch (error) {
+    stampError = error;
+  }
   fs.renameSync(tempDest, dest); // Atomic on same filesystem
-  return pendingMtimeMs !== null;
-}
-
-// Marks the archive copy current once its index attempt is over. Rounded up to
-// a whole millisecond: utimes can't always represent the source's
-// sub-millisecond precision, and a copy even fractionally older would defeat
-// the skip-if-current check on every subsequent sync.
-function markArchiveCurrent(pending: PendingArchiveCopy): void {
-  const { dest, srcStat } = pending;
-  fs.utimesSync(dest, srcStat.atimeMs / 1000, currentArchiveMtimeMs(srcStat.mtimeMs) / 1000);
+  return stampError;
 }
 
 export function extractSessionIdFromPath(filePath: string): string | null {
@@ -211,8 +193,28 @@ export async function syncConversations(
   }
 
   // Collect files to index and summarize
-  const filesToIndex: PendingArchiveCopy[] = [];
+  const filesToIndex: string[] = [];
   const filesToSummarize: Array<{ path: string; sessionId: string | undefined }> = [];
+
+  // The index database records each copy the walk makes until its index
+  // attempt ends, so a sync stopped part-way leaves the rest for the next sync.
+  // Loaded inside the try: a database that cannot load or open must not stop
+  // the walk from archiving.
+  let index: { db: import('better-sqlite3').Database; dbModule: typeof import('./db.js') } | null = null;
+  let pendingIndex = new Set<string>();
+  if (!options.skipIndex) {
+    try {
+      const dbModule = await import('./db.js');
+      const db = dbModule.initDatabase();
+      index = { db, dbModule };
+      pendingIndex = dbModule.listIndexPending(db);
+    } catch (error) {
+      result.errors.push({
+        file: '(index database)',
+        error: `Index progress not recorded this run (a sync stopped before indexing a new copy will not retry it): ${error instanceof Error ? error.message : String(error)}`
+      });
+    }
+  }
 
   // Walk source directory
   const projects = fs.readdirSync(sourceDir);
@@ -245,20 +247,30 @@ export async function syncConversations(
         }
 
         const srcStat = fs.statSync(srcFile);
-        const needsCopy = !archiveIsCurrent(srcStat, destFile);
-        if (needsCopy) {
-          const pending: PendingArchiveCopy = { src: srcFile, dest: destFile, srcStat, markCurrentAttempted: false };
-          const markedPending = copyToArchive(pending);
+        if (!archiveIsCurrent(srcStat, destFile)) {
+          if (index) {
+            try {
+              index.dbModule.markIndexPending(index.db, destFile); // before the copy can look current
+            } catch (error) {
+              result.errors.push({
+                file: srcFile,
+                error: `Index progress not recorded (a sync stopped before this file is indexed will not retry it): ${error instanceof Error ? error.message : String(error)}`
+              });
+            }
+          }
+          const stampError = copyToArchive(srcFile, destFile, srcStat);
           result.copied++;
-          filesToIndex.push(pending);
-          if (!markedPending) {
+          filesToIndex.push(destFile);
+          if (stampError) {
             result.errors.push({
               file: srcFile,
-              error: 'Archive copy could not be marked pending: its filesystem kept no file time below the source\'s, so a sync stopped before this file is indexed will not retry it'
+              error: `Archive copy kept its copy time (Cursor transcripts fall back to it): ${stampError instanceof Error ? stampError.message : String(stampError)}`
             });
           }
         } else {
           result.skipped++;
+          // Archived by an earlier sync that stopped before indexing it.
+          if (pendingIndex.has(destFile)) filesToIndex.push(destFile);
         }
 
         // Check if this file needs a summary (whether new, changed or already archived).
@@ -284,22 +296,7 @@ export async function syncConversations(
     }
   }
 
-  // A file's archive copy is marked current only after its index attempt, so a
-  // sync that stops part-way leaves every unfinished file to be indexed next time.
-  const markCurrentOnce = (pending: PendingArchiveCopy): void => {
-    if (pending.markCurrentAttempted) return;
-    pending.markCurrentAttempted = true;
-    try {
-      markArchiveCurrent(pending);
-    } catch (error) {
-      result.errors.push({
-        file: pending.src,
-        error: error instanceof Error ? error.message : String(error)
-      });
-    }
-  };
-
-  // Index files that need copying (unless skipIndex is set)
+  // Index the files the walk copied or recorded as pending (unless skipIndex is set)
   if (!options.skipIndex && filesToIndex.length > 0) {
     const { parseConversation } = await import('./parser.js');
 
@@ -326,28 +323,25 @@ export async function syncConversations(
       );
     }
 
-    if (embeddings) {
-      const { initDatabase, insertExchange } = await import('./db.js');
+    if (embeddings && index) {
+      const { db: indexDb, dbModule: { insertExchange, clearIndexPending } } = index;
       const { generateExchangeEmbedding } = embeddings;
-
-      const db = initDatabase();
 
       const maxMessageBytes = getMaxMessageBytes();
       let oversizeSkipped = 0;
 
-      for (const pending of filesToIndex) {
-        const file = pending.dest;
+      for (const file of filesToIndex) {
         try {
           // Check for DO NOT INDEX marker
           if (shouldSkipConversation(file)) {
-            continue; // Skip indexing; the finally clause still marks the copy current
+            continue; // Skip indexing; the finally clause still clears its pending record
           }
 
           // High-water mark: index exchanges past the last line we've already
           // covered. Transcript JSONLs are append-only, so MAX(line_end) tells
           // us where to resume — without this, a grown transcript re-embeds
           // every exchange on every sync (#152). Ported from indexer.ts.
-          const hw = db.prepare(
+          const hw = indexDb.prepare(
             'SELECT COALESCE(MAX(line_end), 0) as maxLine FROM exchanges WHERE archive_path = ?'
           ).get(file) as { maxLine: number };
           const maxIndexedLine = hw.maxLine;
@@ -372,7 +366,7 @@ export async function syncConversations(
               exchange.assistantMessage,
               toolNames
             );
-            insertExchange(db, exchange, embedding, toolNames);
+            insertExchange(indexDb, exchange, embedding, toolNames);
           }
 
           result.indexed++;
@@ -382,21 +376,22 @@ export async function syncConversations(
             error: error instanceof Error ? error.message : String(error)
           });
         } finally {
-          markCurrentOnce(pending);
+          try {
+            clearIndexPending(indexDb, file);
+          } catch (error) {
+            result.errors.push({ file, error: error instanceof Error ? error.message : String(error) });
+          }
         }
       }
 
       if (oversizeSkipped > 0) {
         console.log(`  Skipped ${oversizeSkipped} oversize exchange(s) (> ${maxMessageBytes} bytes; set EPISODIC_MEMORY_MAX_MESSAGE_BYTES to change) — likely embedded-transcript payloads (#139)`);
       }
-
-      db.close();
     }
   }
-
-  // Files not indexed this run (indexing skipped or unavailable) are marked
-  // current as well.
-  for (const pending of filesToIndex) markCurrentOnce(pending);
+  // Copies not indexed this run (embedding backend unavailable) keep their
+  // pending record, so a later sync indexes them.
+  index?.db.close();
 
   // Generate summaries for files that need them
   if (!options.skipSummaries && filesToSummarize.length > 0) {

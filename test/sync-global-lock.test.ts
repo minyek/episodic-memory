@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { spawnSync } from 'child_process';
-import { mkdtempSync, mkdirSync, rmSync, chmodSync } from 'fs';
+import { mkdtempSync, mkdirSync, rmSync, chmodSync, existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { tmpdir } from 'os';
@@ -30,6 +30,9 @@ describe('sync-cli per-user lock', () => {
     try { chmodSync(join(root, 'ro-tmp'), 0o700); } catch {}
     rmSync(root, { recursive: true, force: true });
   });
+
+  // A sync that runs opens its index database; a child that skips never does.
+  const ranSync = (name: string) => existsSync(join(root, name, 'test.db'));
 
   function runSync(name: string, extraEnv: Record<string, string | undefined>) {
     const home = join(root, name, 'home');
@@ -65,18 +68,19 @@ describe('sync-cli per-user lock', () => {
 
     expect(result.status).toBe(0);
     expect(result.stderr).toContain(`pid ${process.pid}`);
-    expect(result.stdout).not.toMatch(/Syncing conversations/);
+    expect(ranSync('child')).toBe(false);
   });
 
   it('lets a foreground sync run while the per-user lock is held', () => {
     const lockPath = resolveUserSyncLockPath({ XDG_RUNTIME_DIR: runtimeDir }, process.getuid!());
     held = acquireFileLock(lockPath);
+    expect(held).not.toBeNull();
 
     const result = runSync('foreground', { XDG_RUNTIME_DIR: runtimeDir });
 
     expect(result.status).toBe(0);
     expect(result.stderr).not.toContain(`pid ${process.pid}`);
-    expect(result.stdout).toContain('Syncing conversations');
+    expect(ranSync('foreground')).toBe(true);
   });
 
   it('runs a background child when the per-user lock is free', () => {
@@ -84,7 +88,7 @@ describe('sync-cli per-user lock', () => {
 
     expect(result.status).toBe(0);
     expect(result.stderr).not.toMatch(/another|already running/);
-    expect(result.stdout).toContain('Syncing conversations');
+    expect(ranSync('free')).toBe(true);
   });
 
   // The lock directory is unusable (read-only temp dir, no runtime dir): the
@@ -102,6 +106,6 @@ describe('sync-cli per-user lock', () => {
 
     expect(result.status).toBe(0);
     expect(result.stderr).toContain('per-user sync lock unavailable');
-    expect(result.stdout).toContain('Syncing conversations');
+    expect(ranSync('unusable')).toBe(true);
   });
 });

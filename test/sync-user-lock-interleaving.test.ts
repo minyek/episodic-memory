@@ -9,7 +9,9 @@ import { acquireFileLock, releaseFileLock, type FileLockHandle, type CompromiseK
 
 // Behaviour (spec invariants 1, 2 and 5): at most one holder of a lock keeps
 // running past its next heartbeat; releasing never deletes a successor's PID
-// file; a lock that vanished or was taken over never throws from a timer.
+// file; a lock taken with a handler never throws from a timer when it
+// vanishes or is taken over (one taken without a handler keeps the library's
+// throw, D9).
 //
 // The lock library's stale-steal and heartbeat are several separate
 // filesystem calls. Each scenario pauses one party between two of its calls
