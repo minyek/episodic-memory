@@ -252,7 +252,7 @@ export EPISODIC_MEMORY_EMBED_THREADS=2
 # Wall-clock limit for one background sync, in milliseconds (default: 1800000 =
 # 30 minutes). At the limit the sync exits with code 124 after releasing its
 # locks; indexing is incremental, so the next sync carries on. Exactly 0
-# disables the limit; an empty or invalid value keeps the default. A background
+# disables the limit; an empty or invalid value keeps the default, and a value above 2147483647 (about 24.8 days) is clamped to it. A background
 # sync also runs at nice 10 and takes a per-user lock (in $XDG_RUNTIME_DIR, else
 # the temp dir) so syncs started under different HOMEs or config dirs cannot run
 # at the same time; a foreground `episodic-memory sync` does neither.

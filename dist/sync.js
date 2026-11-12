@@ -196,12 +196,12 @@ export async function syncConversations(sourceDir, destDir, options = {}) {
                 const srcStat = fs.statSync(srcFile);
                 const needsCopy = !archiveIsCurrent(srcStat, destFile);
                 if (needsCopy) {
-                    filesToIndex.push({ src: srcFile, dest: destFile, srcStat, copied: false });
+                    filesToIndex.push({ src: srcFile, dest: destFile, srcStat, archiveAttempted: false, archived: false });
                 }
                 else {
                     result.skipped++;
                 }
-                // Check if this file needs a summary (whether newly copied or existing).
+                // Check if this file needs a summary (whether new, changed or already archived).
                 // shouldQueueForSummary skips files that already have a real summary or
                 // an empty zero-exchange sentinel, and retries stale error sentinels (#96).
                 if (!options.skipSummaries) {
@@ -227,11 +227,12 @@ export async function syncConversations(sourceDir, destDir, options = {}) {
     // A file reaches the archive only after its exchanges are indexed, so a sync
     // that stops part-way leaves every unfinished file to be indexed next time.
     const archivePending = (pending) => {
-        if (pending.copied)
+        if (pending.archiveAttempted)
             return;
+        pending.archiveAttempted = true;
         try {
             copyToArchive(pending);
-            pending.copied = true;
+            pending.archived = true;
             result.copied++;
         }
         catch (error) {
@@ -246,8 +247,8 @@ export async function syncConversations(sourceDir, destDir, options = {}) {
         const { parseConversation } = await import('./parser.js');
         // Load the embedding backend first. It can fail on hosts where sharp's
         // native binding (pulled in transitively by @huggingface/transformers)
-        // can't dlopen libvips (#135). That must not abort the whole sync — copying
-        // has already happened and summaries still need to run — so surface a
+        // can't dlopen libvips (#135). That must not abort the whole sync — the files still
+        // need archiving and summaries still need to run — so surface a
         // clear, actionable error and skip semantic indexing for this run instead
         // of throwing out of syncConversations (which would crash the SessionStart
         // hook that invokes it).
@@ -324,12 +325,16 @@ export async function syncConversations(sourceDir, destDir, options = {}) {
     for (const pending of filesToIndex)
         archivePending(pending);
     // Generate summaries for files that need them
-    if (!options.skipSummaries && filesToSummarize.length > 0) {
+    // The summary pass reads the archive copy, so a file whose copy failed waits
+    // for the sync that archives it.
+    const unarchived = new Set(filesToIndex.filter(p => !p.archived).map(p => p.dest));
+    const summarizable = filesToSummarize.filter(f => !unarchived.has(f.path));
+    if (!options.skipSummaries && summarizable.length > 0) {
         const { parseConversation } = await import('./parser.js');
         const { summarizeConversation, isAuthFailure } = await import('./summarizer.js');
         const summaryLimit = options.summaryLimit ?? 10;
-        const toSummarize = filesToSummarize.slice(0, summaryLimit);
-        const remaining = filesToSummarize.length - toSummarize.length;
+        const toSummarize = summarizable.slice(0, summaryLimit);
+        const remaining = summarizable.length - toSummarize.length;
         console.log(`Generating summaries for ${toSummarize.length} conversation(s)...`);
         if (remaining > 0) {
             console.log(`  (${remaining} more need summaries - will process on next sync)`);

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import type { AcquireOptions } from '../src/file-lock.js';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -9,6 +10,8 @@ import {
   startSyncDeadline,
   lowerBackgroundPriority,
   resolveUserSyncLockPath,
+  startBackgroundSyncLimits,
+  BACKGROUND_CHILD_ENV,
 } from '../src/sync-limits.js';
 
 // Behaviour: a background sync has a wall-clock deadline. Only the exact value
@@ -34,6 +37,16 @@ describe('resolveSyncDeadlineMs', () => {
   });
 });
 
+// A delay above setTimeout's 32-bit limit fires after 1 ms, which would stop
+// every background sync before it did any work.
+describe('resolveSyncDeadlineMs upper bound', () => {
+  it('clamps a value above the timer limit and warns', () => {
+    const warn = vi.fn();
+    expect(resolveSyncDeadlineMs('3000000000', warn)).toBe(2 ** 31 - 1);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('startSyncDeadline', () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -48,15 +61,6 @@ describe('startSyncDeadline', () => {
     expect(onExpire).not.toHaveBeenCalled();
     vi.advanceTimersByTime(1);
     expect(onExpire).toHaveBeenCalledTimes(1);
-  });
-
-  it('does not fire after cancel', () => {
-    vi.useFakeTimers();
-    const onExpire = vi.fn();
-    const deadline = startSyncDeadline(1000, onExpire);
-    deadline.cancel();
-    vi.advanceTimersByTime(5000);
-    expect(onExpire).not.toHaveBeenCalled();
   });
 
   it('arms nothing for 0 (disabled)', () => {
@@ -77,10 +81,10 @@ describe('startSyncDeadline', () => {
       created = real(fn, ms);
       return created;
     }) as typeof setTimeout);
-    const deadline = startSyncDeadline(60_000, () => {});
+    startSyncDeadline(60_000, () => {});
     expect(created).toBeDefined();
     expect(created!.hasRef()).toBe(false);
-    deadline.cancel();
+    clearTimeout(created);
   });
 });
 
@@ -142,5 +146,53 @@ describe('resolveUserSyncLockPath', () => {
     mkdirSync(xdg, { recursive: true });
     expect(resolveUserSyncLockPath({ XDG_RUNTIME_DIR: xdg }, 1, xdg))
       .not.toBe(resolveUserSyncLockPath({ XDG_RUNTIME_DIR: xdg }, 2, xdg));
+  });
+});
+
+// Behaviour (spec AC 3, D9, invariant 4): the background child lowers its
+// priority first, then takes the per-user lock and arms the deadline; a taken-over
+// lock stops it and a vanished one does not; a foreground sync gets none of it.
+describe('startBackgroundSyncLimits', () => {
+  function fakeHooks() {
+    const calls: string[] = [];
+    let options: AcquireOptions = {};
+    const hooks = {
+      lowerPriority: () => { calls.push('nice'); },
+      acquireSlot: (o: AcquireOptions): UserSyncSlot => { calls.push('lock'); options = o; return { kind: 'unavailable', reason: 'x' }; },
+      startDeadline: () => { calls.push('deadline'); },
+      log: () => {},
+      exit: (code: number) => { calls.push(`exit ${code}`); },
+    };
+    return { calls, hooks, options: () => options };
+  }
+
+  it('applies nothing to a foreground sync', () => {
+    const f = fakeHooks();
+    expect(startBackgroundSyncLimits({}, f.hooks)).toBeNull();
+    expect(f.calls).toEqual([]);
+  });
+
+  it('lowers priority first, then takes the lock and arms the deadline', () => {
+    const f = fakeHooks();
+    startBackgroundSyncLimits({ [BACKGROUND_CHILD_ENV]: '1' }, f.hooks);
+    expect(f.calls).toEqual(['nice', 'lock', 'deadline']);
+  });
+
+  it('stops on a taken-over lock, naming the holder, and carries on when the lock vanished', () => {
+    const f = fakeHooks();
+    const log = vi.fn();
+    startBackgroundSyncLimits({ [BACKGROUND_CHILD_ENV]: '1' }, { ...f.hooks, log });
+    f.options().onCompromised!('vanished', null);
+    expect(f.calls).not.toContain('exit 0');
+    f.options().onCompromised!('taken-over', 4242);
+    expect(f.calls).toContain('exit 0');
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('pid 4242'));
+  });
+
+  it('skips without arming a deadline when another sync holds the lock', () => {
+    const f = fakeHooks();
+    const hooks = { ...f.hooks, acquireSlot: (): UserSyncSlot => ({ kind: 'busy', holderPid: 99 }) };
+    startBackgroundSyncLimits({ [BACKGROUND_CHILD_ENV]: '1' }, hooks);
+    expect(f.calls).toEqual(['nice', 'exit 0']);
   });
 });

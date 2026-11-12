@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, appendFileSync, utimesSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import Database from 'better-sqlite3';
@@ -21,6 +21,7 @@ vi.mock('../src/embeddings.js', () => ({
       embedState.reachedHang?.();
       return new Promise<number[]>(() => {});
     }
+    embedState.onEmbed?.(user);
     embedState.embedded.push(user);
     return new Array(384).fill(0.01);
   },
@@ -73,6 +74,7 @@ describe('sync resumes after an interrupted index run', () => {
     embedState.hangOn = null;
     embedState.reachedHang = null;
     embedState.embedded = [];
+    embedState.onEmbed = null;
     restoreConsole = suppressConsole();
   });
 
@@ -106,5 +108,21 @@ describe('sync resumes after an interrupted index run', () => {
     const result = await syncConversations(sourceDir, destDir, { skipSummaries: true });
     expect(result.copied).toBe(3);
     expect(result.indexed).toBe(3);
+  });
+
+  // D8: the archive copy takes the source mtime the walk saw, so exchanges
+  // appended while a file is being indexed are indexed by the next sync.
+  it('indexes, on the next sync, exchanges appended to a source while it was being indexed', async () => {
+    const grown = join(sourceDir, 'proj', `${files[0].id}.jsonl`);
+    embedState.onEmbed = (user) => {
+      if (!user.includes('alpha-one')) return;
+      appendFileSync(grown, exchangeLines(`${files[0].id}-late`, 'alpha-late'));
+      const later = new Date(Date.now() + 5000);
+      utimesSync(grown, later, later);
+    };
+    await syncConversations(sourceDir, destDir, { skipSummaries: true });
+    embedState.onEmbed = null;
+    await syncConversations(sourceDir, destDir, { skipSummaries: true });
+    expect(embedState.embedded.some(u => u.includes('alpha-late'))).toBe(true);
   });
 });

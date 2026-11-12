@@ -35,12 +35,12 @@ export interface FileLockHandle {
 export type CompromiseKind = 'taken-over' | 'vanished';
 export interface AcquireOptions {
     /**
-     * Called from the heartbeat timer when the lock is no longer ours. The
-     * library's own default throws from the timer; this wrapper's default does
-     * nothing, so a lost lock never crashes the holder.
+     * Called from the heartbeat timer when the lock is no longer ours. Without a
+     * handler the library's default applies: it throws from the timer, which
+     * stops the holder.
      */
     onCompromised?: (kind: CompromiseKind, holderPid: number | null) => void;
-    /** Filesystem used by the lock library; tests inject one to pause between calls. */
+    /** Filesystem the lock library calls through; a replacement can observe or pause each call. */
     fs?: object;
     /** Milliseconds after which an unrefreshed lock may be taken over. */
     stale?: number;

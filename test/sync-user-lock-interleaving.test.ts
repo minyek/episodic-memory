@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import { mkdtempSync, rmSync, mkdirSync, utimesSync, existsSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
+import { spawnSync } from 'child_process';
+import { pathToFileURL } from 'url';
 import { tmpdir } from 'os';
 import { acquireFileLock, releaseFileLock, type FileLockHandle, type CompromiseKind } from '../src/file-lock.js';
 
@@ -193,26 +195,24 @@ describe('per-user lock under interleaved acquirers (spec Inv 1, 2, 5)', () => {
     expect(kinds).toEqual(['vanished']);
   });
 
-  it('does not throw from the timer when a lock is compromised and no handler was given', async () => {
-    let signal!: () => void;
-    const heartbeatFoundIt = new Promise<void>((resolve) => { signal = resolve; });
-    const handle = acquireFileLock(lockPath, {
-      ...FAST,
-      fs: hookedFs((method, phase) => {
-        if (method === 'statSync' && phase === 'error') signal();
-      }),
-    });
-    held.push(handle!);
-    const uncaught: unknown[] = [];
-    const listener = (e: unknown) => uncaught.push(e);
-    process.on('uncaughtException', listener);
-    try {
-      rmSync(`${lockPath}.lock`, { recursive: true, force: true });
-      await heartbeatFoundIt;
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      expect(uncaught).toEqual([]);
-    } finally {
-      process.off('uncaughtException', listener);
-    }
+  // D9: only the per-user lock handles a lost lock. A lock taken without a
+  // handler keeps the library's behaviour: its holder stops after a takeover.
+  it('stops a holder that gave no handler when its lock is taken over', () => {
+    const fileLockUrl = pathToFileURL(join(process.cwd(), 'dist', 'file-lock.js')).href;
+    const lockDir = `${lockPath}.lock`;
+    const script = `
+      import fs from 'fs';
+      import { acquireFileLock } from ${JSON.stringify(fileLockUrl)};
+      acquireFileLock(${JSON.stringify(lockPath)}, { stale: 2000, update: 1000 });
+      fs.rmdirSync(${JSON.stringify(lockDir)});
+      fs.mkdirSync(${JSON.stringify(lockDir)});
+      const later = new Date(Date.now() + 5000);
+      fs.utimesSync(${JSON.stringify(lockDir)}, later, later);
+      setInterval(() => {}, 1000);
+    `;
+    // timeout: a hang guard far above the 1 s heartbeat that stops the holder.
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf-8', timeout: 120_000 });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('ECOMPROMISED');
   });
 });

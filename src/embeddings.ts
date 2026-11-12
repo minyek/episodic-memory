@@ -1,3 +1,4 @@
+import { parseEnvCount } from './env-count.js';
 import type { FeatureExtractionPipeline } from '@huggingface/transformers';
 
 /**
@@ -34,17 +35,15 @@ const DEFAULT_INTRA_OP_THREADS = 2;
  * of 2 and says so.
  */
 export function resolveIntraOpThreads(): number | null {
-  const override = process.env.EPISODIC_MEMORY_EMBED_THREADS;
-  if (override === undefined) return DEFAULT_INTRA_OP_THREADS;
-  if (override === '0') return null;
-  if (/^[1-9][0-9]*$/.test(override)) return Number.parseInt(override, 10);
-  console.error(
-    `episodic-memory: ignoring invalid EPISODIC_MEMORY_EMBED_THREADS=${JSON.stringify(override)}; ` +
-    `using ${DEFAULT_INTRA_OP_THREADS} threads`
+  const threads = parseEnvCount(
+    'EPISODIC_MEMORY_EMBED_THREADS',
+    process.env.EPISODIC_MEMORY_EMBED_THREADS,
+    DEFAULT_INTRA_OP_THREADS,
+    'threads',
+    message => console.error(message),
   );
-  return DEFAULT_INTRA_OP_THREADS;
+  return threads === 0 ? null : threads;
 }
-
 
 /**
  * Session options for the embedding pipeline. Spin-waiting is always off, so

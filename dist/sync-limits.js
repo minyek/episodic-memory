@@ -1,27 +1,26 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { parseEnvCount } from './env-count.js';
 import { acquireFileLock, readLockHolder } from './file-lock.js';
 /** Set by the parent of `sync --background` in the environment of the detached child. */
 export const BACKGROUND_CHILD_ENV = 'EPISODIC_MEMORY_BACKGROUND_CHILD';
 export const DEFAULT_SYNC_DEADLINE_MS = 30 * 60 * 1000;
 export const BACKGROUND_NICE = 10;
 export const SYNC_DEADLINE_EXIT_CODE = 124;
+// setTimeout's largest delay; Node fires a longer one after 1 ms.
+const MAX_TIMER_MS = 2 ** 31 - 1;
 /**
  * Wall-clock limit for a background sync, in milliseconds; 0 means no limit.
  * Only the exact string "0" disables it, so an empty or malformed value cannot
  * remove the limit by accident.
  */
 export function resolveSyncDeadlineMs(raw, warn) {
-    if (raw === undefined)
-        return DEFAULT_SYNC_DEADLINE_MS;
-    if (raw === '0')
-        return 0;
-    if (/^[1-9][0-9]*$/.test(raw))
-        return Number.parseInt(raw, 10);
-    warn(`episodic-memory: ignoring invalid EPISODIC_MEMORY_SYNC_TIMEOUT_MS=${JSON.stringify(raw)}; ` +
-        `using ${DEFAULT_SYNC_DEADLINE_MS} ms`);
-    return DEFAULT_SYNC_DEADLINE_MS;
+    const ms = parseEnvCount('EPISODIC_MEMORY_SYNC_TIMEOUT_MS', raw, DEFAULT_SYNC_DEADLINE_MS, 'ms', warn);
+    if (ms <= MAX_TIMER_MS)
+        return ms;
+    warn(`episodic-memory: EPISODIC_MEMORY_SYNC_TIMEOUT_MS=${raw} is above the timer limit; using ${MAX_TIMER_MS} ms`);
+    return MAX_TIMER_MS;
 }
 /**
  * Calls onExpire once after ms milliseconds. The timer does not keep the
@@ -29,10 +28,8 @@ export function resolveSyncDeadlineMs(raw, warn) {
  */
 export function startSyncDeadline(ms, onExpire) {
     if (ms <= 0)
-        return { cancel: () => { } };
-    const timer = setTimeout(onExpire, ms);
-    timer.unref();
-    return { cancel: () => clearTimeout(timer) };
+        return;
+    setTimeout(onExpire, ms).unref();
 }
 /**
  * Lower this process's CPU priority. On Linux the value applies per thread and
@@ -86,4 +83,42 @@ export function acquireUserSyncSlot(env, options = {}) {
     catch (error) {
         return { kind: 'unavailable', reason: error instanceof Error ? error.message : String(error) };
     }
+}
+function holderLabel(pid) {
+    return pid !== null ? `pid ${pid}` : 'another process';
+}
+/**
+ * Limits for the detached child of `sync --background`: lower priority before
+ * any embedding session exists, take the per-user lock, arm the deadline.
+ * Returns the per-user lock to release on exit, or null; a foreground sync
+ * (no child marker) gets none of them.
+ */
+export function startBackgroundSyncLimits(env, hooks) {
+    if (env[BACKGROUND_CHILD_ENV] !== '1')
+        return null;
+    hooks.lowerPriority();
+    const slot = hooks.acquireSlot({
+        onCompromised: (kind, holderPid) => {
+            if (kind === 'taken-over') {
+                hooks.log(`episodic-memory: per-user sync lock taken over by ${holderLabel(holderPid)}; stopping`);
+                hooks.exit(0);
+                return;
+            }
+            hooks.log('episodic-memory: per-user sync lock directory vanished; continuing under the config-dir lock');
+        },
+    });
+    if (slot.kind === 'busy') {
+        hooks.log(`episodic-memory: another background sync is running for this user (${holderLabel(slot.holderPid)}); skipping`);
+        hooks.exit(0);
+        return null;
+    }
+    if (slot.kind === 'unavailable') {
+        hooks.log(`episodic-memory: per-user sync lock unavailable (${slot.reason}); continuing under the config-dir lock`);
+    }
+    const deadlineMs = resolveSyncDeadlineMs(env.EPISODIC_MEMORY_SYNC_TIMEOUT_MS, hooks.log);
+    hooks.startDeadline(deadlineMs, () => {
+        hooks.log(`episodic-memory: sync deadline of ${deadlineMs} ms reached; stopping (progress is kept and the next sync resumes)`);
+        hooks.exit(SYNC_DEADLINE_EXIT_CODE);
+    });
+    return slot.kind === 'held' ? slot.handle : null;
 }

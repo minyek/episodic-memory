@@ -9,7 +9,7 @@ import { spawn } from 'child_process';
 import fs from 'fs';
 import { formatLogLine, getSyncLogPath, getSyncLockPath } from './logging.js';
 import { acquireFileLock, readLockHolder, releaseFileLock } from './file-lock.js';
-import { BACKGROUND_CHILD_ENV, SYNC_DEADLINE_EXIT_CODE, acquireUserSyncSlot, lowerBackgroundPriority, resolveSyncDeadlineMs, startSyncDeadline, } from './sync-limits.js';
+import { BACKGROUND_CHILD_ENV, acquireUserSyncSlot, lowerBackgroundPriority, startBackgroundSyncLimits, startSyncDeadline, } from './sync-limits.js';
 const args = process.argv.slice(2);
 // Reentrancy guard (#87): if this sync was triggered by a SessionStart hook
 // inside a Claude subprocess that the summarizer just spawned, exit silently.
@@ -195,38 +195,13 @@ process.on('exit', releaseSyncLockOnce);
 process.on('SIGINT', () => { releaseSyncLockOnce(); process.exit(130); });
 process.on('SIGTERM', () => { releaseSyncLockOnce(); process.exit(143); });
 process.on('SIGHUP', () => { releaseSyncLockOnce(); process.exit(129); });
-// The detached child of `sync --background` runs at a lower priority, takes the
-// per-user lock that limits background syncs across every HOME, and stops at a
-// deadline. A foreground sync does none of this.
-if (process.env[BACKGROUND_CHILD_ENV] === '1') {
-    lowerBackgroundPriority();
-    const slot = acquireUserSyncSlot(process.env, {
-        onCompromised: (kind, holderPid) => {
-            if (kind === 'taken-over') {
-                const holder = holderPid !== null ? `pid ${holderPid}` : 'another process';
-                console.error(`episodic-memory: per-user sync lock taken over by ${holder}; stopping`);
-                process.exit(0);
-            }
-            console.error('episodic-memory: per-user sync lock directory vanished; continuing under the config-dir lock');
-        },
-    });
-    if (slot.kind === 'busy') {
-        const holder = slot.holderPid !== null ? `pid ${slot.holderPid}` : 'another process';
-        console.error(`episodic-memory: another background sync is running for this user (${holder}); skipping`);
-        process.exit(0);
-    }
-    if (slot.kind === 'held') {
-        userSyncLock = slot.handle;
-    }
-    else {
-        console.error(`episodic-memory: per-user sync lock unavailable (${slot.reason}); continuing under the config-dir lock`);
-    }
-    const deadlineMs = resolveSyncDeadlineMs(process.env.EPISODIC_MEMORY_SYNC_TIMEOUT_MS, message => console.error(message));
-    startSyncDeadline(deadlineMs, () => {
-        console.error(`episodic-memory: sync deadline of ${deadlineMs} ms reached; stopping (progress is kept and the next sync resumes)`);
-        process.exit(SYNC_DEADLINE_EXIT_CODE);
-    });
-}
+userSyncLock = startBackgroundSyncLimits(process.env, {
+    lowerPriority: () => lowerBackgroundPriority(),
+    acquireSlot: options => acquireUserSyncSlot(process.env, options),
+    startDeadline: startSyncDeadline,
+    log: message => console.error(message),
+    exit: code => process.exit(code),
+});
 console.log('Syncing conversations...');
 console.log(`Sources: ${sourceDirs.join(', ')}`);
 console.log(`Destination: ${destDir}\n`);

@@ -76,6 +76,7 @@ describe('sync-cli per-user lock', () => {
 
     expect(result.status).toBe(0);
     expect(result.stderr).not.toContain(`pid ${process.pid}`);
+    expect(result.stdout).toContain('Syncing conversations');
   });
 
   it('runs a background child when the per-user lock is free', () => {
@@ -83,6 +84,7 @@ describe('sync-cli per-user lock', () => {
 
     expect(result.status).toBe(0);
     expect(result.stderr).not.toMatch(/another|already running/);
+    expect(result.stdout).toContain('Syncing conversations');
   });
 
   // The lock directory is unusable (read-only temp dir, no runtime dir): the
@@ -99,6 +101,7 @@ describe('sync-cli per-user lock', () => {
     });
 
     expect(result.status).toBe(0);
-    expect(result.stderr).toMatch(/per-user sync lock/i);
+    expect(result.stderr).toContain('per-user sync lock unavailable');
+    expect(result.stdout).toContain('Syncing conversations');
   });
 });

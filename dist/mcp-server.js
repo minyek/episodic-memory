@@ -30559,20 +30559,29 @@ function initDatabase() {
   return db;
 }
 
+// src/env-count.ts
+function parseEnvCount(name, raw, fallback, unit, warn) {
+  if (raw === void 0) return fallback;
+  if (raw === "0") return 0;
+  if (/^[1-9][0-9]*$/.test(raw)) return Number.parseInt(raw, 10);
+  warn(`episodic-memory: ignoring invalid ${name}=${JSON.stringify(raw)}; using ${fallback} ${unit}`);
+  return fallback;
+}
+
 // src/embeddings.ts
 var MODEL_ID = "Xenova/bge-small-en-v1.5";
 var MODEL_DTYPE = "q8";
 var BGE_QUERY_PREFIX = "Represent this sentence for searching relevant passages: ";
 var DEFAULT_INTRA_OP_THREADS = 2;
 function resolveIntraOpThreads() {
-  const override = process.env.EPISODIC_MEMORY_EMBED_THREADS;
-  if (override === void 0) return DEFAULT_INTRA_OP_THREADS;
-  if (override === "0") return null;
-  if (/^[1-9][0-9]*$/.test(override)) return Number.parseInt(override, 10);
-  console.error(
-    `episodic-memory: ignoring invalid EPISODIC_MEMORY_EMBED_THREADS=${JSON.stringify(override)}; using ${DEFAULT_INTRA_OP_THREADS} threads`
+  const threads = parseEnvCount(
+    "EPISODIC_MEMORY_EMBED_THREADS",
+    process.env.EPISODIC_MEMORY_EMBED_THREADS,
+    DEFAULT_INTRA_OP_THREADS,
+    "threads",
+    (message) => console.error(message)
   );
-  return DEFAULT_INTRA_OP_THREADS;
+  return threads === 0 ? null : threads;
 }
 function buildEmbeddingSessionOptions(intraOpThreads) {
   return {

@@ -10,14 +10,11 @@ export declare const SYNC_DEADLINE_EXIT_CODE = 124;
  * remove the limit by accident.
  */
 export declare function resolveSyncDeadlineMs(raw: string | undefined, warn: (message: string) => void): number;
-export interface SyncDeadline {
-    cancel: () => void;
-}
 /**
  * Calls onExpire once after ms milliseconds. The timer does not keep the
  * process alive, so a sync that finishes early exits at once.
  */
-export declare function startSyncDeadline(ms: number, onExpire: () => void): SyncDeadline;
+export declare function startSyncDeadline(ms: number, onExpire: () => void): void;
 /**
  * Lower this process's CPU priority. On Linux the value applies per thread and
  * only to threads created afterwards, so call it before the embedding session
@@ -47,3 +44,17 @@ export type UserSyncSlot = {
  * under its per-config-dir lock.
  */
 export declare function acquireUserSyncSlot(env: NodeJS.ProcessEnv, options?: AcquireOptions): UserSyncSlot;
+export interface BackgroundSyncHooks {
+    lowerPriority: () => void;
+    acquireSlot: (options: AcquireOptions) => UserSyncSlot;
+    startDeadline: (ms: number, onExpire: () => void) => void;
+    log: (message: string) => void;
+    exit: (code: number) => void;
+}
+/**
+ * Limits for the detached child of `sync --background`: lower priority before
+ * any embedding session exists, take the per-user lock, arm the deadline.
+ * Returns the per-user lock to release on exit, or null; a foreground sync
+ * (no child marker) gets none of them.
+ */
+export declare function startBackgroundSyncLimits(env: NodeJS.ProcessEnv, hooks: BackgroundSyncHooks): FileLockHandle | null;

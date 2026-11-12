@@ -28,10 +28,10 @@ import fs from 'fs';
 import path from 'path';
 import * as lockfile from 'proper-lockfile';
 /**
- * Default stale threshold for the underlying proper-lockfile mtime heartbeat.
- * 10 minutes is well above the longest expected sync (a few minutes for a
- * cold start with hundreds of pending summaries) and the longest expected
- * embedding migration batch (seconds).
+ * Default stale threshold for the underlying proper-lockfile mtime heartbeat,
+ * which refreshes the lock every half threshold. Only a holder whose event loop
+ * stops for 10 minutes (a crash, a hang, a long host suspend) leaves a lock
+ * others may take.
  */
 const DEFAULT_STALE_MS = 10 * 60 * 1000;
 export function acquireFileLock(lockPath, options = {}) {
@@ -44,6 +44,7 @@ export function acquireFileLock(lockPath, options = {}) {
     catch (err) {
         throw err;
     }
+    const onLost = options.onCompromised;
     let release;
     try {
         release = lockfile.lockSync(lockPath, {
@@ -52,10 +53,12 @@ export function acquireFileLock(lockPath, options = {}) {
             stale: options.stale ?? DEFAULT_STALE_MS,
             ...(options.update !== undefined && { update: options.update }),
             ...(options.fs !== undefined && { fs: options.fs }),
-            onCompromised: () => {
-                const kind = fs.existsSync(`${lockPath}.lock`) ? 'taken-over' : 'vanished';
-                options.onCompromised?.(kind, readLockHolder(lockPath));
-            },
+            ...(onLost && {
+                onCompromised: () => {
+                    const kind = fs.existsSync(`${lockPath}.lock`) ? 'taken-over' : 'vanished';
+                    onLost(kind, readLockHolder(lockPath));
+                },
+            }),
         });
     }
     catch (err) {

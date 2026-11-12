@@ -42,12 +42,12 @@ export type CompromiseKind = 'taken-over' | 'vanished';
 
 export interface AcquireOptions {
   /**
-   * Called from the heartbeat timer when the lock is no longer ours. The
-   * library's own default throws from the timer; this wrapper's default does
-   * nothing, so a lost lock never crashes the holder.
+   * Called from the heartbeat timer when the lock is no longer ours. Without a
+   * handler the library's default applies: it throws from the timer, which
+   * stops the holder.
    */
   onCompromised?: (kind: CompromiseKind, holderPid: number | null) => void;
-  /** Filesystem used by the lock library; tests inject one to pause between calls. */
+  /** Filesystem the lock library calls through; a replacement can observe or pause each call. */
   fs?: object;
   /** Milliseconds after which an unrefreshed lock may be taken over. */
   stale?: number;
@@ -56,10 +56,10 @@ export interface AcquireOptions {
 }
 
 /**
- * Default stale threshold for the underlying proper-lockfile mtime heartbeat.
- * 10 minutes is well above the longest expected sync (a few minutes for a
- * cold start with hundreds of pending summaries) and the longest expected
- * embedding migration batch (seconds).
+ * Default stale threshold for the underlying proper-lockfile mtime heartbeat,
+ * which refreshes the lock every half threshold. Only a holder whose event loop
+ * stops for 10 minutes (a crash, a hang, a long host suspend) leaves a lock
+ * others may take.
  */
 const DEFAULT_STALE_MS = 10 * 60 * 1000;
 
@@ -74,6 +74,7 @@ export function acquireFileLock(lockPath: string, options: AcquireOptions = {}):
     throw err;
   }
 
+  const onLost = options.onCompromised;
   let release: () => void;
   try {
     release = lockfile.lockSync(lockPath, {
@@ -82,10 +83,12 @@ export function acquireFileLock(lockPath: string, options: AcquireOptions = {}):
       stale: options.stale ?? DEFAULT_STALE_MS,
       ...(options.update !== undefined && { update: options.update }),
       ...(options.fs !== undefined && { fs: options.fs as any }),
-      onCompromised: () => {
-        const kind: CompromiseKind = fs.existsSync(`${lockPath}.lock`) ? 'taken-over' : 'vanished';
-        options.onCompromised?.(kind, readLockHolder(lockPath));
-      },
+      ...(onLost && {
+        onCompromised: () => {
+          const kind: CompromiseKind = fs.existsSync(`${lockPath}.lock`) ? 'taken-over' : 'vanished';
+          onLost(kind, readLockHolder(lockPath));
+        },
+      }),
     });
   } catch (err: any) {
     if (err.code === 'ELOCKED') return null;
