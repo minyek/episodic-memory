@@ -143,4 +143,19 @@ describe('sync resumes after an interrupted index run', () => {
     await syncConversations(sourceDir, destDir, { skipSummaries: true });
     expect(embedState.embedded.some(u => u.includes('alpha-late'))).toBe(true);
   });
+
+  // Inv 3: the index loop reads the walk copy, so a source that disappears
+  // after the walk and before its file's turn is still indexed in that sync.
+  it('indexes a file whose source is removed after the walk and before its turn', async () => {
+    embedState.onEmbed = (user) => {
+      if (!user.includes('alpha-one')) return;
+      for (const f of files.slice(1)) rmSync(join(sourceDir, 'proj', `${f.id}.jsonl`));
+    };
+    await syncConversations(sourceDir, destDir, { skipSummaries: true });
+
+    const db = new Database(dbPath, { readonly: true });
+    const rows = db.prepare('SELECT archive_path, COUNT(*) AS n FROM exchanges GROUP BY archive_path').all() as Array<{ n: number }>;
+    db.close();
+    expect(rows.map(r => r.n)).toEqual([1, 1, 1]);
+  });
 });

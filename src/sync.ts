@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { currentArchiveMtimeMs, settlePendingMtime } from './archive-stamp.js';
 import { StringDecoder } from 'string_decoder';
 import { SUMMARIZER_CONTEXT_MARKER } from './constants.js';
 import { getExcludedProjects, findJsonlFiles, statIfExists } from './paths.js';
@@ -147,34 +148,37 @@ function archiveIsCurrent(srcStat: fs.Stats, dest: string): boolean {
   return fs.statSync(dest).mtimeMs >= srcStat.mtimeMs;
 }
 
-// The walk's copy is stamped one millisecond older than its source, so it
-// keeps the conversation but is not yet current: a sync that stops before the
-// file's index turn leaves it for the next sync to index.
-function pendingMtimeMs(srcStat: fs.Stats): number {
-  return currentMtimeMs(srcStat) - 1;
-}
-
-// Rounded up to the next whole millisecond: utimes can't always represent the
-// source's sub-millisecond precision, and a copy even fractionally older would
-// defeat the skip-if-current check on every subsequent sync.
-function currentMtimeMs(srcStat: fs.Stats): number {
-  return Math.ceil(srcStat.mtimeMs);
-}
-
-function copyToArchive(pending: PendingArchiveCopy, mtimeMs: number): void {
+// Copies the source into the archive stamped below its mtime (pending), so a
+// sync that stops before the file's index turn leaves it for the next sync to
+// index. The temp file is stamped before the rename, so the archive never holds
+// a fresh copy that looks current. Returns false when no stamp reads back below
+// the source.
+function copyToArchive(pending: PendingArchiveCopy): boolean {
   const { src, dest, srcStat } = pending;
   const destDir = path.dirname(dest);
   if (!fs.existsSync(destDir)) {
     fs.mkdirSync(destDir, { recursive: true });
   }
 
-  // Atomic copy: temp file + rename. The temp file takes its mtime first, so
-  // the archive never holds a copy stamped newer than its source. Harnesses
-  // without per-message timestamps (Cursor agent transcripts) fall back to it.
   const tempDest = dest + '.tmp.' + process.pid;
   fs.copyFileSync(src, tempDest);
-  fs.utimesSync(tempDest, srcStat.atimeMs / 1000, mtimeMs / 1000);
+  fs.utimesSync(tempDest, srcStat.atimeMs / 1000, (currentArchiveMtimeMs(srcStat.mtimeMs) - 1) / 1000);
   fs.renameSync(tempDest, dest); // Atomic on same filesystem
+
+  return settlePendingMtime(srcStat.mtimeMs, mtimeMs => {
+    fs.utimesSync(dest, srcStat.atimeMs / 1000, mtimeMs / 1000);
+    return fs.statSync(dest).mtimeMs;
+  }) !== null;
+}
+
+// Marks the archive copy current once its index attempt is over. Rounded up to
+// a whole millisecond: utimes can't always represent the source's
+// sub-millisecond precision, and a copy even fractionally older would defeat
+// the skip-if-current check on every subsequent sync. Harnesses without
+// per-message timestamps (Cursor agent transcripts) fall back to this mtime.
+function markArchiveCurrent(pending: PendingArchiveCopy): void {
+  const { dest, srcStat } = pending;
+  fs.utimesSync(dest, srcStat.atimeMs / 1000, currentArchiveMtimeMs(srcStat.mtimeMs) / 1000);
 }
 
 export function extractSessionIdFromPath(filePath: string): string | null {
@@ -244,9 +248,15 @@ export async function syncConversations(
         const needsCopy = !archiveIsCurrent(srcStat, destFile);
         if (needsCopy) {
           const pending: PendingArchiveCopy = { src: srcFile, dest: destFile, srcStat, archiveAttempted: false };
-          copyToArchive(pending, pendingMtimeMs(srcStat));
+          const markedPending = copyToArchive(pending);
           result.copied++;
           filesToIndex.push(pending);
+          if (!markedPending) {
+            result.errors.push({
+              file: srcFile,
+              error: 'archive copy could not be marked pending: the filesystem rounds file times up to a step coarser than 2 s'
+            });
+          }
         } else {
           result.skipped++;
         }
@@ -256,7 +266,7 @@ export async function syncConversations(
         // an empty zero-exchange sentinel, and retries stale error sentinels (#96).
         if (!options.skipSummaries) {
           const summaryPath = destFile.replace('.jsonl', '-summary.txt');
-          if (shouldQueueForSummary(summaryPath) && !shouldSkipConversation(needsCopy ? srcFile : destFile)) {
+          if (shouldQueueForSummary(summaryPath) && !shouldSkipConversation(destFile)) {
             // sessionId enables Claude session-resume summarization; when the
             // filename has no UUID to extract (e.g. subagent transcripts named
             // agent-<hex>.jsonl), queue anyway — summarizeConversation falls
@@ -280,7 +290,7 @@ export async function syncConversations(
     if (pending.archiveAttempted) return;
     pending.archiveAttempted = true;
     try {
-      copyToArchive(pending, currentMtimeMs(pending.srcStat));
+      markArchiveCurrent(pending);
     } catch (error) {
       result.errors.push({
         file: pending.src,
@@ -329,7 +339,7 @@ export async function syncConversations(
         const file = pending.dest;
         try {
           // Check for DO NOT INDEX marker
-          if (shouldSkipConversation(pending.src)) {
+          if (shouldSkipConversation(file)) {
             continue; // Skip indexing; the finally clause still marks the copy current
           }
 
@@ -343,7 +353,7 @@ export async function syncConversations(
           const maxIndexedLine = hw.maxLine;
 
           const project = path.basename(path.dirname(file));
-          const exchanges = await parseConversation(pending.src, project, file);
+          const exchanges = await parseConversation(file, project, file);
           const newExchanges = maxIndexedLine > 0
             ? exchanges.filter(e => e.lineStart > maxIndexedLine)
             : exchanges;

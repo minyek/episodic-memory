@@ -29,9 +29,10 @@ vi.mock('../src/summarizer.js', async (importOriginal) => ({
 
 import { syncConversations } from '../src/sync.js';
 
-// Behaviour: a source removed while it is being indexed keeps the copy the walk
-// archived, and the failed refresh of that copy is reported once.
-describe('sync when the archive copy fails', () => {
+// Behaviour: a source removed while it is being indexed does not lose the
+// conversation: it is indexed from the copy the walk archived, the copy stays,
+// and nothing is reported as an error.
+describe('sync when a source disappears during indexing', () => {
   let testDir: string;
   let restoreConsole: () => void;
 
@@ -49,7 +50,7 @@ describe('sync when the archive copy fails', () => {
     rmSync(testDir, { recursive: true, force: true });
   });
 
-  it('keeps the walk copy of a source removed during indexing and reports the failed refresh once', async () => {
+  it('indexes the conversation from its walk copy and keeps the copy', async () => {
     const id = '44444444-4444-4444-8444-444444444444';
     const sourceDir = join(testDir, 'projects');
     const destDir = join(testDir, 'archive');
@@ -60,9 +61,10 @@ describe('sync when the archive copy fails', () => {
       JSON.stringify({ ...base, type: 'user', message: { role: 'user', content: 'q' }, uuid: 'u1' }) + '\n' +
       JSON.stringify({ ...base, parentUuid: 'u1', type: 'assistant', message: { model: 'm', role: 'assistant', content: [{ type: 'text', text: 'a' }] }, uuid: 'a1' }) + '\n');
 
-    const result = await syncConversations(sourceDir, destDir, {});
+    const result = await syncConversations(sourceDir, destDir, { skipSummaries: true });
 
-    expect(result.errors.filter(e => e.error.includes('copyfile'))).toHaveLength(1);
+    expect(result.errors).toEqual([]);
+    expect(result.indexed).toBe(1);
     expect(existsSync(join(destDir, 'proj', `${id}.jsonl`))).toBe(true);
   });
 });
