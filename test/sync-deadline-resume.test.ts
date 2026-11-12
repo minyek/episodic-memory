@@ -262,4 +262,37 @@ describe('sync resumes after an interrupted index run', () => {
     expect(pending.n).toBe(0);
     expect(embedState.embedded.length).toBe(embeddedAfterFirst);
   });
+
+  // A row whose delete is refused stays and is reported; the next sync reads
+  // the copy again from the high-water mark, embeds nothing twice and clears it.
+  it('keeps and reports a pending record whose delete is refused, then clears it on the next run', async () => {
+    let blocked = false;
+    embedState.onEmbed = () => {
+      if (blocked) return;
+      blocked = true;
+      const other = new Database(dbPath);
+      other.exec("CREATE TRIGGER block_pending_delete BEFORE DELETE ON pending_index BEGIN SELECT RAISE(ABORT, 'delete refused'); END");
+      other.close();
+    };
+    const first = await syncConversations(sourceDir, destDir, { skipSummaries: true });
+    expect(first.errors.some(e => e.error.includes('delete refused'))).toBe(true);
+
+    const unblock = new Database(dbPath);
+    unblock.exec('DROP TRIGGER block_pending_delete');
+    const stuck = (unblock.prepare('SELECT COUNT(*) AS n FROM pending_index').get() as { n: number }).n;
+    unblock.close();
+    expect(stuck).toBeGreaterThan(0);
+
+    embedState.onEmbed = null;
+    const embeddedAfterFirst = embedState.embedded.length;
+    await syncConversations(sourceDir, destDir, { skipSummaries: true });
+
+    const db = new Database(dbPath, { readonly: true });
+    const pending = (db.prepare('SELECT COUNT(*) AS n FROM pending_index').get() as { n: number }).n;
+    const rows = db.prepare('SELECT archive_path, COUNT(*) AS n FROM exchanges GROUP BY archive_path').all() as Array<{ n: number }>;
+    db.close();
+    expect(pending).toBe(0);
+    expect(rows.map(r => r.n)).toEqual([1, 1, 1]);
+    expect(embedState.embedded.length).toBe(embeddedAfterFirst);
+  });
 });

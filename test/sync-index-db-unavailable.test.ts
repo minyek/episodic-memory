@@ -5,9 +5,10 @@ import { tmpdir } from 'os';
 
 // The native sqlite binding is a process boundary: when its module cannot
 // load, the walk must still archive every conversation.
+const embedding = vi.hoisted(() => ({ loaded: false }));
 vi.mock('../src/db.js', () => { throw new Error('better-sqlite3 native binding failed to load'); });
 vi.mock('../src/embeddings.js', () => ({
-  initEmbeddings: async () => {},
+  initEmbeddings: async () => { embedding.loaded = true; },
   generateExchangeEmbedding: async () => new Array(384).fill(0.01),
   generateEmbedding: async () => new Array(384).fill(0.01),
 }));
@@ -32,6 +33,8 @@ it('archives every conversation and resolves when the index database module cann
 
     expect(existsSync(join(dest, 'proj', `${id}.jsonl`))).toBe(true);
     expect(result.errors.some(e => e.file === '(index database)')).toBe(true);
+    // Nothing can be indexed, so the embedding model is not loaded either.
+    expect(embedding.loaded).toBe(false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
