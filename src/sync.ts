@@ -140,7 +140,7 @@ interface PendingArchiveCopy {
   // takes the mtime recorded here, so a source that grows while it is being
   // indexed still looks newer than its copy and is picked up again.
   srcStat: fs.Stats;
-  archiveAttempted: boolean;
+  markCurrentAttempted: boolean;
 }
 
 function archiveIsCurrent(srcStat: fs.Stats, dest: string): boolean {
@@ -148,10 +148,12 @@ function archiveIsCurrent(srcStat: fs.Stats, dest: string): boolean {
   return fs.statSync(dest).mtimeMs >= srcStat.mtimeMs;
 }
 
-// Copies the source into the archive stamped below its mtime (pending), so a
-// sync that stops before the file's index turn leaves it for the next sync to
-// index. The temp file is stamped before the rename, so the archive never holds
-// a fresh copy that looks current. Returns false when no stamp reads back below
+// Copies the source into the archive stamped just below its mtime (pending),
+// so a sync that stops before the file's index turn leaves it for the next sync
+// to index. The temp file is stamped before the rename, so the archive never
+// holds a fresh copy that looks current. The stamp follows the source's mtime
+// because harnesses without per-message timestamps (Cursor agent transcripts)
+// fall back to the file's mtime. Returns false when no stamp reads back below
 // the source.
 function copyToArchive(pending: PendingArchiveCopy): boolean {
   const { src, dest, srcStat } = pending;
@@ -162,20 +164,18 @@ function copyToArchive(pending: PendingArchiveCopy): boolean {
 
   const tempDest = dest + '.tmp.' + process.pid;
   fs.copyFileSync(src, tempDest);
-  fs.utimesSync(tempDest, srcStat.atimeMs / 1000, (currentArchiveMtimeMs(srcStat.mtimeMs) - 1) / 1000);
+  const pendingMtimeMs = settlePendingMtime(srcStat.mtimeMs, mtimeMs => {
+    fs.utimesSync(tempDest, srcStat.atimeMs / 1000, mtimeMs / 1000);
+    return fs.statSync(tempDest).mtimeMs;
+  });
   fs.renameSync(tempDest, dest); // Atomic on same filesystem
-
-  return settlePendingMtime(srcStat.mtimeMs, mtimeMs => {
-    fs.utimesSync(dest, srcStat.atimeMs / 1000, mtimeMs / 1000);
-    return fs.statSync(dest).mtimeMs;
-  }) !== null;
+  return pendingMtimeMs !== null;
 }
 
 // Marks the archive copy current once its index attempt is over. Rounded up to
 // a whole millisecond: utimes can't always represent the source's
 // sub-millisecond precision, and a copy even fractionally older would defeat
-// the skip-if-current check on every subsequent sync. Harnesses without
-// per-message timestamps (Cursor agent transcripts) fall back to this mtime.
+// the skip-if-current check on every subsequent sync.
 function markArchiveCurrent(pending: PendingArchiveCopy): void {
   const { dest, srcStat } = pending;
   fs.utimesSync(dest, srcStat.atimeMs / 1000, currentArchiveMtimeMs(srcStat.mtimeMs) / 1000);
@@ -247,14 +247,14 @@ export async function syncConversations(
         const srcStat = fs.statSync(srcFile);
         const needsCopy = !archiveIsCurrent(srcStat, destFile);
         if (needsCopy) {
-          const pending: PendingArchiveCopy = { src: srcFile, dest: destFile, srcStat, archiveAttempted: false };
+          const pending: PendingArchiveCopy = { src: srcFile, dest: destFile, srcStat, markCurrentAttempted: false };
           const markedPending = copyToArchive(pending);
           result.copied++;
           filesToIndex.push(pending);
           if (!markedPending) {
             result.errors.push({
               file: srcFile,
-              error: 'archive copy could not be marked pending: the filesystem rounds file times up to a step coarser than 2 s'
+              error: 'Archive copy could not be marked pending: its filesystem kept no file time below the source\'s, so a sync stopped before this file is indexed will not retry it'
             });
           }
         } else {
@@ -286,9 +286,9 @@ export async function syncConversations(
 
   // A file's archive copy is marked current only after its index attempt, so a
   // sync that stops part-way leaves every unfinished file to be indexed next time.
-  const archivePending = (pending: PendingArchiveCopy): void => {
-    if (pending.archiveAttempted) return;
-    pending.archiveAttempted = true;
+  const markCurrentOnce = (pending: PendingArchiveCopy): void => {
+    if (pending.markCurrentAttempted) return;
+    pending.markCurrentAttempted = true;
     try {
       markArchiveCurrent(pending);
     } catch (error) {
@@ -382,7 +382,7 @@ export async function syncConversations(
             error: error instanceof Error ? error.message : String(error)
           });
         } finally {
-          archivePending(pending);
+          markCurrentOnce(pending);
         }
       }
 
@@ -396,7 +396,7 @@ export async function syncConversations(
 
   // Files not indexed this run (indexing skipped or unavailable) are marked
   // current as well.
-  for (const pending of filesToIndex) archivePending(pending);
+  for (const pending of filesToIndex) markCurrentOnce(pending);
 
   // Generate summaries for files that need them
   if (!options.skipSummaries && filesToSummarize.length > 0) {

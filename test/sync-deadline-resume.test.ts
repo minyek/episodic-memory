@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, appendFileSync, utimesSync } from 'fs';
+import fs, { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, appendFileSync, utimesSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import Database from 'better-sqlite3';
@@ -49,8 +49,8 @@ function exchangeLines(sessionId: string, marker: string): string {
 
 // Behaviour (spec AC 6, invariant 3): a sync that stops part-way through
 // indexing leaves no conversation that later syncs skip without having
-// indexed: a file is brought into the archive only after its exchanges are
-// indexed, so the next sync does the rest.
+// indexed: a file's archive copy is stamped current only after its index
+// attempt, so the next sync does the rest.
 describe('sync resumes after an interrupted index run', () => {
   let testDir: string;
   let sourceDir: string;
@@ -80,6 +80,7 @@ describe('sync resumes after an interrupted index run', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     restoreConsole();
     delete process.env.TEST_DB_PATH;
     rmSync(testDir, { recursive: true, force: true });
@@ -157,5 +158,42 @@ describe('sync resumes after an interrupted index run', () => {
     const rows = db.prepare('SELECT archive_path, COUNT(*) AS n FROM exchanges GROUP BY archive_path').all() as Array<{ n: number }>;
     db.close();
     expect(rows.map(r => r.n)).toEqual([1, 1, 1]);
+  });
+  // Stands in for a filesystem that stores file times its own way: each
+  // mtime sync sets is stored as storedAs(requested), in seconds.
+  function storeFileTimesAs(storedAs: (seconds: number) => number): void {
+    const realUtimes = fs.utimesSync;
+    vi.spyOn(fs, 'utimesSync').mockImplementation(((p: fs.PathLike, atime: fs.TimeLike, mtime: fs.TimeLike) =>
+      realUtimes(p, atime, storedAs(Number(mtime)))) as typeof fs.utimesSync);
+  }
+
+  // Inv 3 (D8) on a filesystem that rounds times up to 2 s: the walk copy is
+  // still stamped below its source, so the next sync indexes what an
+  // abandoned run did not.
+  it('resumes an abandoned run on a filesystem that rounds file times up to 2 s', async () => {
+    storeFileTimesAs(s => Math.ceil(s / 2) * 2);
+    embedState.hangOn = 'bravo-two';
+    const reached = new Promise<void>((resolve) => { embedState.reachedHang = resolve; });
+    void syncConversations(sourceDir, destDir, { skipSummaries: true });
+    await reached;
+
+    embedState.hangOn = null;
+    embedState.reachedHang = null;
+    await syncConversations(sourceDir, destDir, { skipSummaries: true });
+
+    const db = new Database(dbPath, { readonly: true });
+    const rows = db.prepare('SELECT archive_path, COUNT(*) AS n FROM exchanges GROUP BY archive_path').all() as Array<{ n: number }>;
+    db.close();
+    expect(rows.map(r => r.n)).toEqual([1, 1, 1]);
+  });
+
+  // D8: when no pending stamp reads back below the source, the copy is
+  // reported, because a stop before its index would leave it unindexed.
+  it('reports each copy whose pending stamp the filesystem cannot keep below its source', async () => {
+    storeFileTimesAs(() => 4_102_444_800); // 2100-01-01: no stamp reads back below the source
+    const result = await syncConversations(sourceDir, destDir, { skipSummaries: true });
+
+    expect(result.indexed).toBe(3);
+    expect(result.errors.map(e => e.file).sort()).toEqual(files.map(f => join(sourceDir, 'proj', `${f.id}.jsonl`)).sort());
   });
 });

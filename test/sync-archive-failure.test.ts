@@ -4,8 +4,8 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { suppressConsole } from './test-utils.js';
 
-// The embedder and summarizer are process boundaries here. The first embed
-// removes the source, so the later archive copy fails.
+// The embedder is a process boundary here. The first embed removes the
+// source while its file is being indexed, as Claude Code's cleanup can.
 const state = vi.hoisted(() => ({ sourcePath: '' as string, removed: false }));
 
 vi.mock('../src/embeddings.js', () => ({
@@ -21,12 +21,6 @@ vi.mock('../src/embeddings.js', () => ({
   generateEmbedding: async () => new Array(384).fill(0.01),
 }));
 
-const summarizeConversation = vi.hoisted(() => vi.fn(async () => 'summary'));
-vi.mock('../src/summarizer.js', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../src/summarizer.js')>()),
-  summarizeConversation,
-}));
-
 import { syncConversations } from '../src/sync.js';
 
 // Behaviour: a source removed while it is being indexed does not lose the
@@ -40,7 +34,6 @@ describe('sync when a source disappears during indexing', () => {
     testDir = mkdtempSync(join(tmpdir(), 'em-sync-archive-failure-'));
     process.env.TEST_DB_PATH = join(testDir, 'test.db');
     state.removed = false;
-    summarizeConversation.mockClear();
     restoreConsole = suppressConsole();
   });
 
