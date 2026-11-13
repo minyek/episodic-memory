@@ -68,7 +68,7 @@ export class SummarizerSdkError extends Error {
  *   subtype 'success', so the bare-subtype check missed it and the fallback
  *   never fired.
  * Auth failures also use subtype 'success' — those are NOT resume-specific and
- * are excluded here (401/429/529 return false); isAuthFailure handles them.
+ * are excluded here (401/429/529 return false); classifySummaryFailure classifies them.
  */
 export function isResumeFailure(error: unknown): boolean {
   if (!(error instanceof SummarizerSdkError)) return false;
@@ -183,21 +183,6 @@ export interface CodexSummarizerCommand {
   skipVersionCheck?: boolean;
 }
 
-/**
- * Get API environment overrides for summarization calls.
- * Returns full env merged with process.env so subprocess inherits PATH, HOME, etc.
- *
- * Env vars (all optional):
- * - EPISODIC_MEMORY_API_MODEL: Model to use (default: haiku)
- * - EPISODIC_MEMORY_API_MODEL_FALLBACK: Fallback model on error (default: sonnet)
- * - EPISODIC_MEMORY_API_BASE_URL: Custom API endpoint
- * - EPISODIC_MEMORY_API_TOKEN: Auth token for custom endpoint
- * - EPISODIC_MEMORY_API_TIMEOUT_MS: Timeout for API calls (default: SDK default)
- * - EPISODIC_MEMORY_API_MAX_RETRIES: Retries the subprocess makes against a failing
- *   API before it reports the error (default: 2). The subprocess also runs with its
- *   retry watchdog off: in watchdog mode it retries 429 and 529 past this count for
- *   minutes to hours with no output, which a caller sees only as a timeout.
- */
 const DEFAULT_API_MAX_RETRIES = 2;
 let apiRetriesWarned = false;
 
@@ -218,6 +203,21 @@ function resolveApiMaxRetries(): number {
   );
 }
 
+/**
+ * Get API environment overrides for summarization calls.
+ * Returns full env merged with process.env so subprocess inherits PATH, HOME, etc.
+ *
+ * Env vars (all optional):
+ * - EPISODIC_MEMORY_API_MODEL: Model to use (default: haiku)
+ * - EPISODIC_MEMORY_API_MODEL_FALLBACK: Fallback model on error (default: sonnet)
+ * - EPISODIC_MEMORY_API_BASE_URL: Custom API endpoint
+ * - EPISODIC_MEMORY_API_TOKEN: Auth token for custom endpoint
+ * - EPISODIC_MEMORY_API_TIMEOUT_MS: Timeout for API calls (default: SDK default)
+ * - EPISODIC_MEMORY_API_MAX_RETRIES: Retries the subprocess makes against a failing
+ *   API before it reports the error (default: 2). The subprocess also runs with its
+ *   retry watchdog off: in watchdog mode it retries 429 and 529 past this count for
+ *   minutes to hours with no output, which a caller sees only as a timeout.
+ */
 export function getApiEnv(): Record<string, string | undefined> | undefined {
   const baseUrl = process.env.EPISODIC_MEMORY_API_BASE_URL;
   const token = process.env.EPISODIC_MEMORY_API_TOKEN;

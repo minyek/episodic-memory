@@ -233,10 +233,11 @@ export EPISODIC_MEMORY_API_TOKEN=your-token
 export EPISODIC_MEMORY_API_TIMEOUT_MS=3000000
 
 # Retries the summarizer's Claude subprocess makes against a failing API before
-# it reports the error (default: 2). The subprocess always runs with its retry
-# watchdog off, whatever the parent environment says, so an overloaded (529) or
-# rate-limited (429) API is reported within seconds instead of being retried for
-# minutes to hours with no output.
+# it reports the error (default: 2; exactly 0 makes one attempt with no retry;
+# an empty or invalid value keeps 2 and says so). The subprocess always runs with
+# its retry watchdog off, whatever the parent environment says, so an overloaded
+# (529) or rate-limited (429) API is reported within seconds instead of being
+# retried for minutes to hours with no output.
 export EPISODIC_MEMORY_API_MAX_RETRIES=2
 
 # Override Codex binary path if needed (default: codex)
@@ -323,7 +324,7 @@ Codex summarization requires `codex-cli 0.130.0` or newer. If Codex app-server s
 
 | Component | Uses custom config? |
 |-----------|---------------------|
-| Summarization | Yes (up to 10 calls/sync) |
+| Summarization | Yes (by default up to 10 conversations per source directory per sync) |
 | Embeddings | No (local Transformers.js) |
 | Search | No (local SQLite) |
 | MCP tools | No |

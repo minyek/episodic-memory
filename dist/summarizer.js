@@ -58,7 +58,7 @@ export class SummarizerSdkError extends Error {
  *   subtype 'success', so the bare-subtype check missed it and the fallback
  *   never fired.
  * Auth failures also use subtype 'success' — those are NOT resume-specific and
- * are excluded here (401/429/529 return false); isAuthFailure handles them.
+ * are excluded here (401/429/529 return false); classifySummaryFailure classifies them.
  */
 export function isResumeFailure(error) {
     if (!(error instanceof SummarizerSdkError))
@@ -155,6 +155,20 @@ export function classifySummaryFailure(error) {
     }
     return null;
 }
+const DEFAULT_API_MAX_RETRIES = 2;
+let apiRetriesWarned = false;
+/** Test hook: lets the invalid-override warning fire again. */
+export function resetApiRetriesWarningForTests() {
+    apiRetriesWarned = false;
+}
+function resolveApiMaxRetries() {
+    return parseEnvCount(process.env.EPISODIC_MEMORY_API_MAX_RETRIES, { name: 'EPISODIC_MEMORY_API_MAX_RETRIES', fallback: DEFAULT_API_MAX_RETRIES, unit: 'retries' }, message => {
+        if (apiRetriesWarned)
+            return;
+        apiRetriesWarned = true;
+        console.error(message);
+    });
+}
 /**
  * Get API environment overrides for summarization calls.
  * Returns full env merged with process.env so subprocess inherits PATH, HOME, etc.
@@ -170,20 +184,6 @@ export function classifySummaryFailure(error) {
  *   retry watchdog off: in watchdog mode it retries 429 and 529 past this count for
  *   minutes to hours with no output, which a caller sees only as a timeout.
  */
-const DEFAULT_API_MAX_RETRIES = 2;
-let apiRetriesWarned = false;
-/** Test hook: lets the invalid-override warning fire again. */
-export function resetApiRetriesWarningForTests() {
-    apiRetriesWarned = false;
-}
-function resolveApiMaxRetries() {
-    return parseEnvCount(process.env.EPISODIC_MEMORY_API_MAX_RETRIES, { name: 'EPISODIC_MEMORY_API_MAX_RETRIES', fallback: DEFAULT_API_MAX_RETRIES, unit: 'retries' }, message => {
-        if (apiRetriesWarned)
-            return;
-        apiRetriesWarned = true;
-        console.error(message);
-    });
-}
 export function getApiEnv() {
     const baseUrl = process.env.EPISODIC_MEMORY_API_BASE_URL;
     const token = process.env.EPISODIC_MEMORY_API_TOKEN;

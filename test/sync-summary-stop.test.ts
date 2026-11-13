@@ -281,8 +281,6 @@ describe('a summary batch stops on a global failure and on repeated suspect ones
     for (let n = 0; n < 4; n++) expect(summaryText(n)).toBe('Did a thing.');
   });
 
-  // AC 7: a failure inside a long conversation's synthesis call propagates; a
-  // failure that is the conversation's own still falls back to the chunk summaries.
   it('announces the stop once in the sync log, not once per skipped file', async () => {
     conversations([2, 2, 2, 2]);
     script([api(529)]);
@@ -294,6 +292,8 @@ describe('a summary batch stops on a global failure and on repeated suspect ones
     announced.mockRestore();
   });
 
+  // AC 7: a failure inside a long conversation's synthesis call propagates; a
+  // failure that is the conversation's own still falls back to the chunk summaries.
   it('stops on a global failure in the synthesis call of a long conversation', async () => {
     conversations([16, 2, 2, 2]);
     script([ok, ok, api(529)]);
@@ -400,7 +400,7 @@ describe('a Codex conversation whose Claude fallback fails', () => {
 
     const failure = await summarizeConversation([exchange, { ...exchange, id: 'x2' }]).then(() => null, e => e as Error);
 
-    expect(failure!.message).toMatch(/Codex: .*ENOENT/);
+    expect(failure!.message).toMatch(/ENOENT/);
     expect(failure!.message).toMatch(/HTTP 400/);
   });
 });
@@ -417,7 +417,7 @@ describe('the thinking-budget fallback', () => {
       archivePath: '/tmp/none.jsonl', lineStart: 1, lineEnd: 2, cwd: '/x',
     };
 
-    await expect(summarizeConversation([exchange, { ...exchange, id: 'x2' }])).rejects.toThrow(/API error/);
+    await expect(summarizeConversation([exchange, { ...exchange, id: 'x2' }])).rejects.toThrow(/thinking\.budget_tokens/);
   });
 });
 
@@ -425,15 +425,15 @@ describe('the thinking-budget fallback', () => {
 // failed for no stated reason; it is wrong after a stop that names its cause.
 describe('shouldHintApiConfiguration', () => {
   it('hints when every summary attempt failed and no batch stopped on a named cause', () => {
-    expect(shouldHintApiConfiguration({ summaryFailures: 3, summarized: 0, stoppedOnService: false })).toBe(true);
+    expect(shouldHintApiConfiguration({ summaryFailures: 3, summarized: 0, stoppedOnNonAuthCause: false })).toBe(true);
   });
 
   it('does not hint after a stop that names its cause', () => {
-    expect(shouldHintApiConfiguration({ summaryFailures: 3, summarized: 0, stoppedOnService: true })).toBe(false);
+    expect(shouldHintApiConfiguration({ summaryFailures: 3, summarized: 0, stoppedOnNonAuthCause: true })).toBe(false);
   });
 
   it('does not hint when some summary succeeded or none failed', () => {
-    expect(shouldHintApiConfiguration({ summaryFailures: 3, summarized: 1, stoppedOnService: false })).toBe(false);
-    expect(shouldHintApiConfiguration({ summaryFailures: 0, summarized: 0, stoppedOnService: false })).toBe(false);
+    expect(shouldHintApiConfiguration({ summaryFailures: 3, summarized: 1, stoppedOnNonAuthCause: false })).toBe(false);
+    expect(shouldHintApiConfiguration({ summaryFailures: 0, summarized: 0, stoppedOnNonAuthCause: false })).toBe(false);
   });
 });

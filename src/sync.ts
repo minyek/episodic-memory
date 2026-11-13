@@ -111,12 +111,12 @@ export interface SyncResult {
 
 /**
  * Whether the sync report should suggest checking the API configuration: every
- * summary attempt failed and no batch stopped on a cause it already named.
+ * summary attempt failed and no batch stopped on a cause other than auth.
  */
 export function shouldHintApiConfiguration(
-  report: { summaryFailures: number; summarized: number; stoppedOnService: boolean },
+  report: { summaryFailures: number; summarized: number; stoppedOnNonAuthCause: boolean },
 ): boolean {
-  return report.summaryFailures > 0 && report.summarized === 0 && !report.stoppedOnService;
+  return report.summaryFailures > 0 && report.summarized === 0 && !report.stoppedOnNonAuthCause;
 }
 
 export interface SyncOptions {

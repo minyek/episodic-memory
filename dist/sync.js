@@ -106,10 +106,10 @@ function hasConversationContent(filePath) {
 }
 /**
  * Whether the sync report should suggest checking the API configuration: every
- * summary attempt failed and no batch stopped on a cause it already named.
+ * summary attempt failed and no batch stopped on a cause other than auth.
  */
 export function shouldHintApiConfiguration(report) {
-    return report.summaryFailures > 0 && report.summarized === 0 && !report.stoppedOnService;
+    return report.summaryFailures > 0 && report.summarized === 0 && !report.stoppedOnNonAuthCause;
 }
 /**
  * Derive sync options from the process environment.

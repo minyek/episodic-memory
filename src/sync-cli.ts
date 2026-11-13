@@ -229,7 +229,7 @@ console.log(`Sources: ${sourceDirs.join(', ')}`);
 console.log(`Destination: ${destDir}\n`);
 
 async function syncAll() {
-  const totals = { copied: 0, skipped: 0, indexed: 0, summarized: 0, errors: [] as Array<{file: string; error: string}>, sourcesWithSummaryWork: 0, totalNeedingSummaries: 0, summaryStoppedOnService: false };
+  const totals = { copied: 0, skipped: 0, indexed: 0, summarized: 0, errors: [] as Array<{file: string; error: string}>, sourcesWithSummaryWork: 0, totalNeedingSummaries: 0, summaryStoppedOnNonAuthCause: false };
 
   for (const sourceDir of sourceDirs) {
     const result = await syncConversations(sourceDir, destDir, { ...syncOptions, summaryLimit });
@@ -238,7 +238,7 @@ async function syncAll() {
     totals.indexed += result.indexed;
     totals.summarized += result.summarized;
     totals.errors.push(...result.errors);
-    if (result.summaryStop === 'other') totals.summaryStoppedOnService = true;
+    if (result.summaryStop === 'other') totals.summaryStoppedOnNonAuthCause = true;
   }
 
   console.log(`\n✅ Sync complete!`);
@@ -257,7 +257,7 @@ async function syncAll() {
 
     // Help diagnose silent summarization failures (#70)
     const summaryErrors = totals.errors.filter(e => e.error.startsWith('Summary generation failed'));
-    if (shouldHintApiConfiguration({ summaryFailures: summaryErrors.length, summarized: totals.summarized, stoppedOnService: totals.summaryStoppedOnService })) {
+    if (shouldHintApiConfiguration({ summaryFailures: summaryErrors.length, summarized: totals.summarized, stoppedOnNonAuthCause: totals.summaryStoppedOnNonAuthCause })) {
       console.log(`\n💡 All ${summaryErrors.length} summarization attempts failed.`);
       console.log(`  Check your API configuration (EPISODIC_MEMORY_API_BASE_URL / ANTHROPIC_API_KEY).`);
     }
