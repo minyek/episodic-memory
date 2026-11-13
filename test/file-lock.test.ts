@@ -165,4 +165,12 @@ describe('file-lock — concurrent contention under proper-lockfile atomicity', 
     const handle = acquireFileLock(lockPath);
     expect(handle).toBeNull();
   });
+
+  // Inv 2: after a takeover the PID file names the successor; releasing must leave it.
+  it('leaves a PID file that names another process when releasing', () => {
+    const handle = acquireFileLock(lockPath)!;
+    writeFileSync(lockPath, '424242');
+    releaseFileLock(handle);
+    expect(readFileSync(lockPath, 'utf-8')).toBe('424242');
+  });
 });

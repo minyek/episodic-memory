@@ -1,28 +1,32 @@
 export declare const BGE_QUERY_PREFIX = "Represent this sentence for searching relevant passages: ";
 /**
- * Resolve an intra-op thread cap for the embedding session, or null to leave
+ * Resolve the intra-op thread cap for the embedding session, or null to leave
  * onnxruntime at its default (one worker per core).
  *
- * Embedding is done one exchange at a time (batch=1) throughout indexing, sync,
- * and the re-embed migration. At that size onnxruntime-node's default intra-op
- * thread pool fans each tiny int8 matmul across every core, which on Apple
- * Silicon pegs ~5 cores for almost no throughput gain and makes a bulk re-embed
- * hog the whole machine. Capping intra-op threads keeps embedding off the
- * user's cores; measured on an M-series Mac, a cap of 2 is as fast or faster
- * than the uncapped default while using ~1.7 cores instead of ~5 (and pulls
- * further ahead when the machine is otherwise busy, since it stops the pool
- * from oversubscribing).
+ * Embedding runs one exchange at a time (batch=1) through indexing, sync and
+ * the re-embed migration. At that size the default pool fans each tiny int8
+ * matmul across every core and its idle workers spin: measured on a 32-core
+ * Linux host, 100 embeddings used 50 CPU-seconds with 32 threads busy, against
+ * 2.4-2.6 CPU-seconds for 300 embeddings capped at 2. Vectors are
+ * bit-identical, so no re-index follows.
  *
- * This stays on the same CPU / q8 execution provider, so embeddings are
- * bit-identical to the uncapped output — no re-index is triggered. (CoreML and
- * WebGPU were evaluated and rejected: on this quantized model they either run
- * far slower and never leave the CPU, or require an fp32 model whose vectors
- * differ from the stored q8 ones and would force a full re-index.)
- *
- * Override with EPISODIC_MEMORY_EMBED_THREADS: a positive integer sets the cap;
- * 0 (or any non-positive/invalid value) restores onnxruntime's default.
+ * Override with EPISODIC_MEMORY_EMBED_THREADS: a positive integer sets the cap,
+ * and exactly "0" restores onnxruntime's default. Any other value keeps the cap
+ * of 2 and says so.
  */
 export declare function resolveIntraOpThreads(): number | null;
+/**
+ * Session options for the embedding pipeline. Spin-waiting is always off, so
+ * idle workers sleep instead of burning a core; the value is a string because
+ * the native binding rejects other types.
+ */
+export declare function buildEmbeddingSessionOptions(intraOpThreads: number | null): {
+    extra: {
+        'session.intra_op.allow_spinning': string;
+    };
+    intraOpNumThreads?: number | undefined;
+    interOpNumThreads?: number | undefined;
+};
 /**
  * Thrown when the embedding backend can't be loaded. The most common cause is
  * that `@huggingface/transformers` eagerly requires `sharp`, whose native

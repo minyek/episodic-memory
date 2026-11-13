@@ -20,4 +20,7 @@ export declare function getAllExchanges(db: Database.Database): Array<{
     archivePath: string;
 }>;
 export declare function getFileLastIndexed(db: Database.Database, archivePath: string): number | null;
+export declare function markIndexPending(db: Database.Database, archivePath: string): void;
+export declare function clearIndexPending(db: Database.Database, archivePath: string): void;
+export declare function listIndexPending(db: Database.Database): Set<string>;
 export declare function deleteExchange(db: Database.Database, id: string): void;
