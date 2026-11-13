@@ -295,4 +295,20 @@ describe('sync resumes after an interrupted index run', () => {
     expect(rows.map(r => r.n)).toEqual([1, 1, 1]);
     expect(embedState.embedded.length).toBe(embeddedAfterFirst);
   });
+
+  // U3: a copy the walk cannot record is still archived, and the report names
+  // the command that indexes it later.
+  it('archives a copy whose pending record is refused and reports the command that indexes it', async () => {
+    const prepare = new Database(dbPath);
+    prepare.exec('CREATE TABLE IF NOT EXISTS pending_index (archive_path TEXT PRIMARY KEY)');
+    prepare.exec("CREATE TRIGGER block_pending_insert BEFORE INSERT ON pending_index BEGIN SELECT RAISE(ABORT, 'insert refused'); END");
+    prepare.close();
+
+    const result = await syncConversations(sourceDir, destDir, { skipSummaries: true });
+
+    for (const f of files) expect(existsSync(join(destDir, 'proj', `${f.id}.jsonl`))).toBe(true);
+    const refused = result.errors.filter(e => e.error.includes('insert refused'));
+    expect(refused).toHaveLength(3);
+    expect(refused.every(e => e.error.includes('episodic-memory index --cleanup'))).toBe(true);
+  });
 });

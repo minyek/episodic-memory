@@ -211,7 +211,7 @@ export async function syncConversations(
     } catch (error) {
       result.errors.push({
         file: '(index database)',
-        error: `Index progress not recorded this run (a sync stopped before indexing a new copy will not retry it): ${error instanceof Error ? error.message : String(error)}`
+        error: `Index database unavailable; this run indexes nothing and later syncs will not index the conversations it archives (run \`episodic-memory index --cleanup\` once the database opens): ${error instanceof Error ? error.message : String(error)}`
       });
     }
   }
@@ -254,7 +254,7 @@ export async function syncConversations(
             } catch (error) {
               result.errors.push({
                 file: srcFile,
-                error: `Index progress not recorded (a sync stopped before this file is indexed will not retry it): ${error instanceof Error ? error.message : String(error)}`
+                error: `Index progress not recorded; if this sync stops before indexing this file, later syncs will not index it (\`episodic-memory index --cleanup\` will): ${error instanceof Error ? error.message : String(error)}`
               });
             }
           }

@@ -32,7 +32,9 @@ it('archives every conversation and resolves when the index database module cann
     const result = await syncConversations(src, dest, { skipSummaries: true });
 
     expect(existsSync(join(dest, 'proj', `${id}.jsonl`))).toBe(true);
-    expect(result.errors.some(e => e.file === '(index database)')).toBe(true);
+    const reported = result.errors.find(e => e.file === '(index database)');
+    expect(reported).toBeDefined();
+    expect(reported!.error).toContain('episodic-memory index --cleanup');
     // Nothing can be indexed, so the embedding model is not loaded either.
     expect(embedding.loaded).toBe(false);
   } finally {
