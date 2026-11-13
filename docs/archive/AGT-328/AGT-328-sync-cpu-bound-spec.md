@@ -165,7 +165,7 @@ The update to `embed-threads.test.ts` rewrites the "null elsewhere" assertion to
 
 ## Downstream check
 
-The user's real index may already hold archived but never indexed conversations from syncs killed mid-index. A read-only check on 2026-11-12: 7,013 archived files, 3,864 distinct indexed, 3,149 without rows; 2,169 of those are under 2 KB (zero-exchange files, expected) and 980 are larger and may be genuinely unindexed (unverified: sidechain and DO-NOT-INDEX files are skipped by design). The repair, `episodic-memory index --cleanup --no-summaries`, writes user data and needs the user's go-ahead.
+The user's real index may already hold archived but never indexed conversations from syncs killed mid-index. A read-only check on 2026-11-12: 7,013 archived files, 3,864 distinct indexed, 3,149 without rows; 2,169 of those are under 2 KB (zero-exchange files, expected) and 980 are larger and may be genuinely unindexed (unverified: sidechain and DO-NOT-INDEX files are skipped by design). The repair, `episodic-memory index --cleanup --no-summaries`, writes user data and needs the user's go-ahead. Do not run it until AGT-336 F1 lands: `index --cleanup`, index-all, rebuild, index-session and `index --repair` do not honour the DO NOT INDEX marker, so they would index every marked conversation whose source still exists.
 
 ## Consistency with AGT-329
 
