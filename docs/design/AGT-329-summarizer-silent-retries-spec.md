@@ -28,7 +28,7 @@ The stop messages and the skipped-file report entries follow the existing auth s
 
 1. The summarizer subprocess environment (`getApiEnv`) has `CLAUDE_CODE_MAX_RETRIES` equal to 2 by default and to `EPISODIC_MEMORY_API_MAX_RETRIES` when that is a non-negative integer, and `CLAUDE_CODE_RETRY_WATCHDOG` equal to `0`; neither inherited value (for example 100 and 1) reaches it; an empty or invalid override keeps 2 and warns once.
 2. `isAuthFailure` is true for a `SummarizerSdkError` whose detail is "Not logged in · Please run /login" (subtype `success`) and false for an unrelated error.
-3. After a failure `classifySummaryFailure` classes as global (auth including "Not logged in", HTTP 429, 503 or 529, a credit-balance 400), that source's summary batch makes no further summarizer call; each untried file gets an error sentinel naming the cause, and its report entry reads `Summary generation skipped: <cause>`; the sync log names the cause once. Any other 4xx (for example 400) is per-file, and so is a Codex conversation's Claude-fallback failure.
+3. After a failure `classifySummaryFailure` classes as global (auth including "Not logged in", HTTP 429, 503 or 529, a credit-balance 400), that source's summary batch makes no further summarizer call; each untried file gets an error sentinel naming the cause, and its report entry reads `Summary generation skipped: <cause>`; the stop is announced once in the sync log (`Summarizing stopped: <cause>`), not once per skipped file; the cause also appears in each skipped file's report entry. Any other 4xx (for example 400) is per-file, and so is a Codex conversation's Claude-fallback failure.
 4. After two consecutive suspect failures (a timeout, or a 5xx other than 503 and 529) the batch stops the same way; one, or two with a returned call (a summary or a per-file error) between them, do not stop it.
 5. Acceptance run, from a shell whose environment carries `CLAUDE_CODE_MAX_RETRIES=100` and `CLAUDE_CODE_RETRY_WATCHDOG=1` as agent sessions do: the real SDK subprocess, run through `runSummarizerQuery` with `buildSummarizerQueryOptions` options against a local server that always answers 529, returns a `SummarizerSdkError` with HTTP 529 after exactly 3 `POST /v1/messages` requests and before the summary timeout; the same run with the parent environment passed unchanged makes more than 3 requests and gives no result in 45 s.
 6. README documents `EPISODIC_MEMORY_API_MAX_RETRIES` and the stop conditions.
@@ -41,7 +41,7 @@ State: each conversation's `<archive>/<project>/<session>-summary.txt`: missing,
 
 ### Invariants
 1. The stop path writes an error sentinel only to a file the walk queued (missing, or an error sentinel past the retry interval); it never overwrites summary text or an empty sentinel.
-2. A summary file holds summary text only when a model call returned it for that conversation (AC 8).
+2. A summary file holds summary text only when a model call returned it for that conversation, or the trivial-conversation placeholder for one that needs no call (AC 8).
 3. After a stop, that `syncConversations` call makes no summarizer call.
 4. An error sentinel written by a failure or a stop comes due after the retry interval, never earlier.
 
@@ -63,7 +63,7 @@ State: each conversation's `<archive>/<project>/<session>-summary.txt`: missing,
 | sync summary loop (`src/sync.ts` under `sync-cli`), stop path included | the summary file at walk time (`shouldQueueForSummary`, sync.ts:281): a guarded reader | empty sentinel, summary text, error sentinel, skip sentinel (sync.ts:421, 437, 445, 455) | overwrites the whole file | indexing and earlier summaries (awaits) between check and write; no other writer acts in it, since every writer holds the sync lock (sync-cli.ts:202, index-cli.ts:16) |
 | a second `sync-cli` (another session's SessionStart) | none | none | none | refused by the sync lock (sync-cli.ts:195-206) |
 | `index-cli` indexer paths (indexer.ts:146-160, 262-271, 399-412) | `shouldQueueForSummary` | summary text, error sentinel | overwrites | under the same lock |
-| `index-cli --repair` (verify.ts:162-164) | verify's missing and outdated lists | summary text | overwrites | under the same lock |
+| `index-cli --repair` (verify.ts:162-164) | verify's missing and outdated lists | summary text when the call returns; on a failure the file is left as it was and the exchanges are indexed anyway | overwrites | under the same lock |
 
 Readers of the summary file, which already read every state this change writes, a running earlier MCP server included: `search.ts:270` (skips error sentinels), `stats.ts:62` and `verify.ts:64` (an error sentinel counts as missing), and `shouldQueueForSummary` in sync and the indexer. No interleaving test: every writer holds the sync lock across its check-to-write gap. Residual, unchanged by this change: the lock is taken over after 10 minutes without a heartbeat (file-lock.ts:59-62), and the library exports (src/index.ts:5) let an outside caller run the indexer writers without it.
 

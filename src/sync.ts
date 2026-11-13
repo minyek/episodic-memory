@@ -408,7 +408,7 @@ export async function syncConversations(
   // Generate summaries for files that need them
   if (!options.skipSummaries && filesToSummarize.length > 0) {
     const { parseConversation } = await import('./parser.js');
-    const { summarizeConversation, classifySummaryFailure, isAuthFailure, isTrivialConversation } = await import('./summarizer.js');
+    const { summarizeConversation, classifySummaryFailure, isTrivialConversation } = await import('./summarizer.js');
 
     const summaryLimit = options.summaryLimit ?? 10;
     const toSummarize = filesToSummarize.slice(0, summaryLimit);
@@ -419,7 +419,7 @@ export async function syncConversations(
       console.log(`  (${remaining} more need summaries - will process on next sync)`);
     }
 
-    // A global failure (expired Claude CLI OAuth #138, an overloaded or
+    // A global failure (an expired or missing Claude CLI login, an overloaded or
     // rate-limited service, an empty credit balance) hits every conversation the
     // same way, so the rest of this source's batch is not tried: its files get an
     // error sentinel naming the cause and retry after the retry interval
@@ -428,6 +428,7 @@ export async function syncConversations(
     // batch only when it repeats with no returned call in between.
     let stopMessage: string | null = null;
     let suspectInARow = 0;
+    const suspectFailuresToStop = 2;
 
     for (const { path: filePath, sessionId } of toSummarize) {
       if (stopMessage !== null) {
@@ -481,11 +482,11 @@ export async function syncConversations(
         } else if (failure.kind === 'suspect') {
           suspectInARow++;
         }
-        if (failure !== null && (failure.kind === 'global' || suspectInARow >= 2)) {
+        if (failure !== null && (failure.kind === 'global' || suspectInARow >= suspectFailuresToStop)) {
           stopMessage =
             `${failure.cause}; the remaining summaries retry after the retry interval ` +
             '(EPISODIC_MEMORY_SUMMARY_ERROR_RETRY_HOURS, default 1 hour)';
-          result.summaryStop = isAuthFailure(error) ? 'auth' : 'other';
+          result.summaryStop = failure.auth ? 'auth' : 'other';
           console.error(`  Summarizing stopped: ${stopMessage}`);
         }
       }

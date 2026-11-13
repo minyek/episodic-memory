@@ -177,6 +177,17 @@ describe('a summary batch stops on a global failure and on repeated suspect ones
     expect(result.summaryStop).toBeUndefined();
   });
 
+  it('does not stop for two timeouts with a per-file failure between them', async () => {
+    conversations([2, 2, 2, 2]);
+    script([hang, api(400), api(400), hang, ok]);
+
+    const result = await run();
+
+    expect(calls()).toBe(5);
+    expect(summaryText(3)).toBe('Did a thing.');
+    expect(result.summaryStop).toBeUndefined();
+  });
+
   it('stops at the second consecutive timeout', async () => {
     conversations([2, 2, 2, 2]);
     script([hang, hang]);
@@ -222,6 +233,7 @@ describe('a summary batch stops on a global failure and on repeated suspect ones
     const result = await run();
 
     expect(summaryText(0)).toMatch(/^__ERRORED__\n/);
+    expect(summaryText(0)).toContain('HTTP 400');
     for (const n of [1, 2, 3]) expect(summaryText(n)).toBe('Did a thing.');
     expect(result.summarized).toBe(3);
   });
@@ -233,7 +245,8 @@ describe('a summary batch stops on a global failure and on repeated suspect ones
     mkdirSync(join(dest, 'proj'), { recursive: true });
     writeFileSync(summaryPath(2), 'A real summary that must stay.');
     writeFileSync(summaryPath(3), '');
-    writeFileSync(summaryPath(4), '__ERRORED__\n{"attempts":1}\nan earlier failure\n');
+    const freshSentinel = `__ERRORED__\n${new Date().toISOString()}\nan earlier failure\n`;
+    writeFileSync(summaryPath(4), freshSentinel);
     script([api(529)]);
 
     const result = await run();
@@ -241,7 +254,7 @@ describe('a summary batch stops on a global failure and on repeated suspect ones
     expect(calls()).toBe(1);
     expect(summaryText(2)).toBe('A real summary that must stay.');
     expect(summaryText(3)).toBe('');
-    expect(summaryText(4)).toBe('__ERRORED__\n{"attempts":1}\nan earlier failure\n');
+    expect(summaryText(4)).toBe(freshSentinel);
     expect(result.errors.some(e => e.file.includes(IDS[2]) || e.file.includes(IDS[3]) || e.file.includes(IDS[4]))).toBe(false);
   });
 
@@ -270,6 +283,17 @@ describe('a summary batch stops on a global failure and on repeated suspect ones
 
   // AC 7: a failure inside a long conversation's synthesis call propagates; a
   // failure that is the conversation's own still falls back to the chunk summaries.
+  it('announces the stop once in the sync log, not once per skipped file', async () => {
+    conversations([2, 2, 2, 2]);
+    script([api(529)]);
+    const announced = vi.spyOn(console, 'error');
+
+    await run();
+
+    expect(announced.mock.calls.filter(args => String(args[0]).includes('Summarizing stopped'))).toHaveLength(1);
+    announced.mockRestore();
+  });
+
   it('stops on a global failure in the synthesis call of a long conversation', async () => {
     conversations([16, 2, 2, 2]);
     script([ok, ok, api(529)]);
@@ -363,6 +387,37 @@ describe('a Codex conversation whose Claude fallback fails', () => {
     expect(failure!.message).toMatch(/Codex/);
     expect(failure!.message).toMatch(/Not logged in/);
     expect(classifySummaryFailure(failure)).toBeNull();
+  });
+
+  it('names both failures when the Claude fallback fails for a reason of its own', async () => {
+    script([api(400)]);
+    const exchange: ConversationExchange = {
+      id: 'x1', project: 'p', timestamp: '2026-01-02T00:00:00Z', harness: 'codex', sessionId: 'codex-sess-2',
+      userMessage: 'A question long enough to be a real exchange for the summarizer, number one.',
+      assistantMessage: 'An answer long enough to be a real reply for the summarizer, number one.',
+      archivePath: '/tmp/none.jsonl', lineStart: 1, lineEnd: 2, cwd: '/x',
+    };
+
+    const failure = await summarizeConversation([exchange, { ...exchange, id: 'x2' }]).then(() => null, e => e as Error);
+
+    expect(failure!.message).toMatch(/Codex: .*ENOENT/);
+    expect(failure!.message).toMatch(/HTTP 400/);
+  });
+});
+
+// Invariant 2: error text is never returned as a summary, whichever path produced it.
+describe('the thinking-budget fallback', () => {
+  it('fails the conversation instead of returning the API error text as its summary', async () => {
+    const budgetError = { type: 'result', subtype: 'success', is_error: false, result: 'API Error: 400 thinking.budget_tokens must be less than max_tokens' };
+    vi.mocked(query).mockImplementation((() => (async function* () { yield budgetError; })()) as any);
+    const exchange: ConversationExchange = {
+      id: 'x1', project: 'p', timestamp: '2026-01-02T00:00:00Z', harness: 'claude', sessionId: 'claude-sess-3',
+      userMessage: 'A question long enough to be a real exchange for the summarizer, number one.',
+      assistantMessage: 'An answer long enough to be a real reply for the summarizer, number one.',
+      archivePath: '/tmp/none.jsonl', lineStart: 1, lineEnd: 2, cwd: '/x',
+    };
+
+    await expect(summarizeConversation([exchange, { ...exchange, id: 'x2' }])).rejects.toThrow(/API error/);
   });
 });
 

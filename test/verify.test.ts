@@ -5,6 +5,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { initDatabase, insertExchange } from '../src/db.js';
+import { summarizeConversation } from '../src/summarizer.js';
 import { ConversationExchange } from '../src/types.js';
 
 vi.mock('../src/embeddings.js', () => ({
@@ -349,5 +350,31 @@ describe('repairIndex', () => {
     expect(verifyAfter.outdated.length).toBe(0);
 
     dbAfter.close();
+  });
+
+  // Summaries are display-only; the index is what search reads. A failed summary
+  // must not keep repair from indexing the conversation.
+  it('indexes during repair even when the summary call fails, leaving the summary file as it was', { timeout: 30000 }, async () => {
+    const projectArchive = path.join(archiveDir, 'test-project');
+    fs.mkdirSync(projectArchive, { recursive: true });
+    const conversationPath = path.join(projectArchive, 'summary-fails-repair.jsonl');
+    const summaryPath = conversationPath.replace('.jsonl', '-summary.txt');
+    const messages = [
+      JSON.stringify({ type: 'user', message: { role: 'user', content: 'Hello' }, timestamp: '2024-01-01T00:00:00Z' }),
+      JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: 'Hi there!' }, timestamp: '2024-01-01T00:00:01Z' })
+    ];
+    fs.writeFileSync(conversationPath, messages.join('\n'));
+    fs.writeFileSync(summaryPath, 'Old summary');
+
+    const issues: VerificationResult = { missing: [{ path: conversationPath, reason: 'No summary file' }], outdated: [], orphaned: [], corrupted: [] };
+    vi.mocked(summarizeConversation).mockRejectedValueOnce(new Error('every chunk failed'));
+
+    await repairIndex(issues);
+
+    const db = initDatabase();
+    const rows = db.prepare('SELECT COUNT(*) AS n FROM exchanges WHERE archive_path = ?').get(conversationPath) as { n: number };
+    db.close();
+    expect(rows.n).toBeGreaterThan(0);
+    expect(fs.readFileSync(summaryPath, 'utf-8')).toBe('Old summary');
   });
 });

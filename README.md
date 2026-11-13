@@ -234,17 +234,10 @@ export EPISODIC_MEMORY_API_TIMEOUT_MS=3000000
 
 # Retries the summarizer's Claude subprocess makes against a failing API before
 # it reports the error (default: 2). The subprocess always runs with its retry
-# watchdog off, whatever the parent environment says: in watchdog mode it
-# retries an overloaded (529) or rate-limited (429) API for minutes to hours with
-# no output, which showed up here only as "timed out after 120000ms".
+# watchdog off, whatever the parent environment says, so an overloaded (529) or
+# rate-limited (429) API is reported within seconds instead of being retried for
+# minutes to hours with no output.
 export EPISODIC_MEMORY_API_MAX_RETRIES=2
-
-# A sync's summary batch (per source directory) stops at the first sign that the
-# rest will fail the same way: an expired or missing login, an overloaded,
-# rate-limited or unavailable API (HTTP 429, 503, 529), or an empty credit
-# balance. It also stops at the second consecutive timeout or other 5xx error.
-# The conversations not tried get an error marker naming the cause and are tried
-# again after EPISODIC_MEMORY_SUMMARY_ERROR_RETRY_HOURS (default 1 hour).
 
 # Override Codex binary path if needed (default: codex)
 export EPISODIC_MEMORY_CODEX_BIN=/path/to/codex
@@ -336,6 +329,8 @@ Codex summarization requires `codex-cli 0.130.0` or newer. If Codex app-server s
 | MCP tools | No |
 
 Summaries are display-only: they decorate search results and are never embedded or searched, so `EPISODIC_MEMORY_SKIP_SUMMARIES=1` costs you that line of context and nothing else.
+
+A sync's summary batch (one per source directory) stops at the first sign that the rest will fail the same way: an expired or missing login, an overloaded, rate-limited or unavailable API (HTTP 429, 503 or 529), or an empty credit balance. It also stops at the second consecutive timeout or other 5xx error. The conversations not tried get an error marker naming the cause and are tried again after `EPISODIC_MEMORY_SUMMARY_ERROR_RETRY_HOURS` (default 1 hour).
 
 ## Commands
 

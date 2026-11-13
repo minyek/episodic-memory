@@ -134,23 +134,23 @@ export function classifySummaryFailure(error) {
     if (error instanceof CodexFallbackError)
         return null;
     if (isAuthFailure(error)) {
-        return { kind: 'global', cause: 'Claude CLI authentication failed (run `claude` and re-authenticate)' };
+        return { kind: 'global', cause: 'Claude CLI authentication failed (run `claude` and re-authenticate)', auth: true };
     }
     if (error instanceof SummarizerTimeoutError) {
-        return { kind: 'suspect', cause: 'the summarizer timed out' };
+        return { kind: 'suspect', cause: 'the summarizer timed out', auth: false };
     }
     if (error instanceof SummarizerSdkError) {
         const status = error.apiErrorStatus;
         if (status === 429)
-            return { kind: 'global', cause: 'the Claude API is rate limiting requests (HTTP 429)' };
+            return { kind: 'global', cause: 'the Claude API is rate limiting requests (HTTP 429)', auth: false };
         if (status === 503 || status === 529) {
-            return { kind: 'global', cause: `the Claude API is overloaded or unavailable (HTTP ${status})` };
+            return { kind: 'global', cause: `the Claude API is overloaded or unavailable (HTTP ${status})`, auth: false };
         }
         if (status === 400 && /credit balance is too low/i.test(`${error.detail ?? ''} ${error.message}`)) {
-            return { kind: 'global', cause: 'the Claude account has no credit left (HTTP 400)' };
+            return { kind: 'global', cause: 'the Claude account has no credit left (HTTP 400)', auth: false };
         }
         if (typeof status === 'number' && status >= 500 && status < 600) {
-            return { kind: 'suspect', cause: `the Claude API returned HTTP ${status}` };
+            return { kind: 'suspect', cause: `the Claude API returned HTTP ${status}`, auth: false };
         }
     }
     return null;
@@ -448,8 +448,7 @@ async function callClaude(prompt, sessionId, useFallback = false, cwd) {
             console.log(`    ${primaryModel} hit thinking budget error, retrying with ${fallbackModel}`);
             return await callClaude(prompt, sessionId, true, cwd);
         }
-        // If fallback also fails, return error message
-        return result;
+        throw new Error(`Summarizer returned an API error: ${truncateSdkErrorDetail(result)}`);
     }
     return result;
 }
@@ -712,11 +711,8 @@ export async function summarizeConversation(exchanges, sessionId) {
         return await summarizeWithClaude(exchanges, sessionId, codexSessionId);
     }
     catch (error) {
-        // A Codex conversation needs no Claude login or capacity, so the failure of
-        // its Claude fallback is that conversation's own, not a reason to stop a batch.
-        if (codexError !== undefined && classifySummaryFailure(error) !== null) {
+        if (codexError !== undefined)
             throw new CodexFallbackError(codexError, error);
-        }
         throw error;
     }
 }
@@ -774,8 +770,9 @@ ${conversationText}`;
             // archive-only ("No conversation found", subtype 'success'; #122), or the
             // subprocess refused to resume and exited nonzero (bg-agent sessions; #146).
             // Any of those → retry once without resume, feeding the transcript as text.
-            // Genuine auth failures are global, not resume-specific, so they fail-fast
-            // (never fall back). A timeout is neither, so it also propagates.
+            // A failure classifySummaryFailure recognises (auth, an overloaded or
+            // rate-limited service, an empty credit balance, a timeout or another 5xx)
+            // is not resume-specific, so it propagates without a second call.
             if (claudeSessionId &&
                 (isResumeFailure(error) || isProcessExitFailure(error)) &&
                 classifySummaryFailure(error) === null) {
@@ -796,6 +793,7 @@ ${conversationText}`;
     console.log(`  Split into ${chunks.length} chunks`);
     // Summarize each chunk
     const chunkSummaries = [];
+    let lastChunkError;
     for (let i = 0; i < chunks.length; i++) {
         const chunkText = formatConversationText(chunks[i]);
         const prompt = `${SUMMARIZER_CONTEXT_MARKER}.
@@ -814,11 +812,13 @@ Example: <summary>Implemented HID keyboard functionality for ESP32. Hit Bluetoot
         catch (error) {
             if (classifySummaryFailure(error) !== null)
                 throw error;
+            lastChunkError = error;
             console.log(`  Chunk ${i + 1} failed, skipping`);
         }
     }
     if (chunkSummaries.length === 0) {
-        throw new Error('Unable to summarize conversation: every chunk failed');
+        const last = lastChunkError instanceof Error ? lastChunkError.message : String(lastChunkError);
+        throw new Error(`Unable to summarize conversation: every chunk failed (last: ${last})`, { cause: lastChunkError });
     }
     // Synthesize chunks into final summary
     const synthesisPrompt = `${SUMMARIZER_CONTEXT_MARKER}.

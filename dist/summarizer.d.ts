@@ -65,6 +65,8 @@ export interface SummaryFailureClass {
     /** global: the whole batch will fail the same way; suspect: may be one conversation's own. */
     kind: 'global' | 'suspect';
     cause: string;
+    /** True when the login failed, so the user must re-authenticate. */
+    auth: boolean;
 }
 /**
  * Classifies a summarizer failure for the batch loop in sync. Global failures
