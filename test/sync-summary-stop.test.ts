@@ -359,6 +359,17 @@ describe('a summary batch stops on a global failure and on repeated suspect ones
   });
 });
 
+// Two exchanges, so the conversation is not trivial and needs a model call.
+function twoExchanges(harness: ConversationExchange['harness'], sessionId: string): ConversationExchange[] {
+  const exchange: ConversationExchange = {
+    id: 'x1', project: 'p', timestamp: '2026-01-02T00:00:00Z', harness, sessionId,
+    userMessage: 'A question long enough to be a real exchange for the summarizer, number one.',
+    assistantMessage: 'An answer long enough to be a real reply for the summarizer, number one.',
+    archivePath: '/nonexistent/none.jsonl', lineStart: 1, lineEnd: 2, cwd: '/x',
+  };
+  return [exchange, { ...exchange, id: 'x2' }];
+}
+
 describe('a Codex conversation whose Claude fallback fails', () => {
   const savedBin = process.env.EPISODIC_MEMORY_CODEX_BIN;
 
@@ -374,31 +385,19 @@ describe('a Codex conversation whose Claude fallback fails', () => {
 
   it('fails that conversation alone: the login is not a global problem for a Codex user', async () => {
     script([notLoggedIn]);
-    const exchange: ConversationExchange = {
-      id: 'x1', project: 'p', timestamp: '2026-01-02T00:00:00Z', harness: 'codex', sessionId: 'codex-sess-1',
-      userMessage: 'A question long enough to be a real exchange for the summarizer, number one.',
-      assistantMessage: 'An answer long enough to be a real reply for the summarizer, number one.',
-      archivePath: '/tmp/none.jsonl', lineStart: 1, lineEnd: 2, cwd: '/x',
-    };
 
-    const failure = await summarizeConversation([exchange, { ...exchange, id: 'x2' }]).then(() => null, e => e as Error);
+    const failure = await summarizeConversation(twoExchanges('codex', 'codex-sess-1')).then(() => null, e => e as Error);
 
     expect(failure).not.toBeNull();
-    expect(failure!.message).toMatch(/Codex/);
+    expect(failure!.message).toMatch(/ENOENT/);
     expect(failure!.message).toMatch(/Not logged in/);
     expect(classifySummaryFailure(failure)).toBeNull();
   });
 
   it('names both failures when the Claude fallback fails for a reason of its own', async () => {
     script([api(400)]);
-    const exchange: ConversationExchange = {
-      id: 'x1', project: 'p', timestamp: '2026-01-02T00:00:00Z', harness: 'codex', sessionId: 'codex-sess-2',
-      userMessage: 'A question long enough to be a real exchange for the summarizer, number one.',
-      assistantMessage: 'An answer long enough to be a real reply for the summarizer, number one.',
-      archivePath: '/tmp/none.jsonl', lineStart: 1, lineEnd: 2, cwd: '/x',
-    };
 
-    const failure = await summarizeConversation([exchange, { ...exchange, id: 'x2' }]).then(() => null, e => e as Error);
+    const failure = await summarizeConversation(twoExchanges('codex', 'codex-sess-2')).then(() => null, e => e as Error);
 
     expect(failure!.message).toMatch(/ENOENT/);
     expect(failure!.message).toMatch(/HTTP 400/);
@@ -410,25 +409,20 @@ describe('the thinking-budget fallback', () => {
   it('fails the conversation instead of returning the API error text as its summary', async () => {
     const budgetError = { type: 'result', subtype: 'success', is_error: false, result: 'API Error: 400 thinking.budget_tokens must be less than max_tokens' };
     vi.mocked(query).mockImplementation((() => (async function* () { yield budgetError; })()) as any);
-    const exchange: ConversationExchange = {
-      id: 'x1', project: 'p', timestamp: '2026-01-02T00:00:00Z', harness: 'claude', sessionId: 'claude-sess-3',
-      userMessage: 'A question long enough to be a real exchange for the summarizer, number one.',
-      assistantMessage: 'An answer long enough to be a real reply for the summarizer, number one.',
-      archivePath: '/tmp/none.jsonl', lineStart: 1, lineEnd: 2, cwd: '/x',
-    };
 
-    await expect(summarizeConversation([exchange, { ...exchange, id: 'x2' }])).rejects.toThrow(/thinking\.budget_tokens/);
+    await expect(summarizeConversation(twoExchanges('claude', 'claude-sess-3'))).rejects.toThrow(/thinking\.budget_tokens/);
   });
 });
 
-// Behaviour: the "check your API configuration" hint is for summaries that all
-// failed for no stated reason; it is wrong after a stop that names its cause.
+// Behaviour: the "check your API configuration" hint follows summaries that all
+// failed, unless a batch stopped on a cause other than auth, which the stop
+// already names; an auth stop still gets the hint.
 describe('shouldHintApiConfiguration', () => {
-  it('hints when every summary attempt failed and no batch stopped on a named cause', () => {
+  it('hints when every summary attempt failed and no batch stopped on a cause other than auth', () => {
     expect(shouldHintApiConfiguration({ summaryFailures: 3, summarized: 0, stoppedOnNonAuthCause: false })).toBe(true);
   });
 
-  it('does not hint after a stop that names its cause', () => {
+  it('does not hint after a stop on a cause other than auth', () => {
     expect(shouldHintApiConfiguration({ summaryFailures: 3, summarized: 0, stoppedOnNonAuthCause: true })).toBe(false);
   });
 

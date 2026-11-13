@@ -282,7 +282,7 @@ describe('repairIndex', () => {
     dbAfter.close();
   });
 
-  it('re-indexes outdated files during repair', { timeout: 30000 }, async () => {
+  it('re-indexes outdated files during repair', async () => {
     // Create conversation file with summary
     const projectArchive = path.join(archiveDir, 'test-project');
     fs.mkdirSync(projectArchive, { recursive: true });
@@ -354,7 +354,7 @@ describe('repairIndex', () => {
 
   // Summaries are display-only; the index is what search reads. A failed summary
   // must not keep repair from indexing the conversation.
-  it('indexes during repair even when the summary call fails, leaving the summary file as it was', { timeout: 30000 }, async () => {
+  it('indexes during repair even when the summary call fails, leaving the summary file as it was', async () => {
     const projectArchive = path.join(archiveDir, 'test-project');
     fs.mkdirSync(projectArchive, { recursive: true });
     const conversationPath = path.join(projectArchive, 'summary-fails-repair.jsonl');
