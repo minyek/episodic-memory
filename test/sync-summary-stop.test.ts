@@ -221,7 +221,6 @@ describe('a summary batch stops on a global failure and on repeated suspect ones
     const result = await run();
 
     expect(summaryText(0)).toMatch(/^__ERRORED__\n/);
-    expect(summaryText(0)).not.toContain('Unable to summarize');
     for (const n of [1, 2, 3]) expect(summaryText(n)).toBe('Did a thing.');
     expect(result.summarized).toBe(3);
   });

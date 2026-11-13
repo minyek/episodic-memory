@@ -232,6 +232,20 @@ export EPISODIC_MEMORY_API_TOKEN=your-token
 # Increase timeout for slow endpoints (milliseconds)
 export EPISODIC_MEMORY_API_TIMEOUT_MS=3000000
 
+# Retries the summarizer's Claude subprocess makes against a failing API before
+# it reports the error (default: 2). The subprocess always runs with its retry
+# watchdog off, whatever the parent environment says: in watchdog mode it
+# retries an overloaded (529) or rate-limited (429) API for minutes to hours with
+# no output, which showed up here only as "timed out after 120000ms".
+export EPISODIC_MEMORY_API_MAX_RETRIES=2
+
+# A sync's summary batch (per source directory) stops at the first sign that the
+# rest will fail the same way: an expired or missing login, an overloaded,
+# rate-limited or unavailable API (HTTP 429, 503, 529), or an empty credit
+# balance. It also stops at the second consecutive timeout or other 5xx error.
+# The conversations not tried get an error marker naming the cause and are tried
+# again after EPISODIC_MEMORY_SUMMARY_ERROR_RETRY_HOURS (default 1 hour).
+
 # Override Codex binary path if needed (default: codex)
 export EPISODIC_MEMORY_CODEX_BIN=/path/to/codex
 
