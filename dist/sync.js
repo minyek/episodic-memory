@@ -105,6 +105,13 @@ function hasConversationContent(filePath) {
     }
 }
 /**
+ * Whether the sync report should suggest checking the API configuration: every
+ * summary attempt failed and no batch stopped on a cause it already named.
+ */
+export function shouldHintApiConfiguration(report) {
+    return report.summaryFailures > 0 && report.summarized === 0 && !report.stoppedOnService;
+}
+/**
  * Derive sync options from the process environment.
  *
  * `EPISODIC_MEMORY_SKIP_SUMMARIES=1` turns the summarization pass off.

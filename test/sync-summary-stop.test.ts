@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, utimesSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import type { ConversationExchange } from '../src/types.js';
@@ -10,7 +10,7 @@ import { suppressConsole } from './test-utils.js';
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({ query: vi.fn() }));
 
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import { syncConversations } from '../src/sync.js';
+import { syncConversations, shouldHintApiConfiguration } from '../src/sync.js';
 import { summarizeConversation, classifySummaryFailure } from '../src/summarizer.js';
 
 type Step =
@@ -56,6 +56,7 @@ const IDS = [
   '22222222-2222-4222-8222-222222222222',
   '33333333-3333-4333-8333-333333333333',
   '44444444-4444-4444-8444-444444444444',
+  '55555555-5555-4555-8555-555555555555',
 ];
 
 describe('a summary batch stops on a global failure and on repeated suspect ones', () => {
@@ -224,6 +225,114 @@ describe('a summary batch stops on a global failure and on repeated suspect ones
     for (const n of [1, 2, 3]) expect(summaryText(n)).toBe('Did a thing.');
     expect(result.summarized).toBe(3);
   });
+
+  // Invariant 1: the stop writes only to files the walk queued; a real summary,
+  // an empty sentinel and an error sentinel still inside the retry interval stay as they are.
+  it('leaves a real summary, an empty sentinel and a fresh error sentinel untouched when it stops', async () => {
+    conversations([2, 2, 2, 2, 2]);
+    mkdirSync(join(dest, 'proj'), { recursive: true });
+    writeFileSync(summaryPath(2), 'A real summary that must stay.');
+    writeFileSync(summaryPath(3), '');
+    writeFileSync(summaryPath(4), '__ERRORED__\n{"attempts":1}\nan earlier failure\n');
+    script([api(529)]);
+
+    const result = await run();
+
+    expect(calls()).toBe(1);
+    expect(summaryText(2)).toBe('A real summary that must stay.');
+    expect(summaryText(3)).toBe('');
+    expect(summaryText(4)).toBe('__ERRORED__\n{"attempts":1}\nan earlier failure\n');
+    expect(result.errors.some(e => e.file.includes(IDS[2]) || e.file.includes(IDS[3]) || e.file.includes(IDS[4]))).toBe(false);
+  });
+
+  // Invariant 4 and AC 3: the sentinels name the cause and the retry interval, are not
+  // retried inside the interval, and are retried once it has passed.
+  it('names the cause in each sentinel, and retries them only after the retry interval', async () => {
+    conversations([2, 2, 2, 2]);
+    script([api(529)]);
+    await run();
+
+    expect(summaryText(0)).toContain('HTTP 529');
+    expect(summaryText(1)).toContain('HTTP 529');
+    expect(summaryText(1)).toContain('EPISODIC_MEMORY_SUMMARY_ERROR_RETRY_HOURS');
+
+    vi.mocked(query).mockClear();
+    script([ok, ok, ok, ok]);
+    await run();
+    expect(calls()).toBe(0);
+
+    const twoHoursAgo = new Date(Date.now() - 2 * 3600_000);
+    for (let n = 0; n < 4; n++) utimesSync(summaryPath(n), twoHoursAgo, twoHoursAgo);
+    await run();
+    expect(calls()).toBe(4);
+    for (let n = 0; n < 4; n++) expect(summaryText(n)).toBe('Did a thing.');
+  });
+
+  // AC 7: a failure inside a long conversation's synthesis call propagates; a
+  // failure that is the conversation's own still falls back to the chunk summaries.
+  it('stops on a global failure in the synthesis call of a long conversation', async () => {
+    conversations([16, 2, 2, 2]);
+    script([ok, ok, api(529)]);
+
+    const result = await run();
+
+    expect(calls()).toBe(3);
+    expect(summaryText(0)).toMatch(/^__ERRORED__\n/);
+    expect(result.errors.filter(e => e.error.startsWith('Summary generation skipped:'))).toHaveLength(3);
+  });
+
+  it('falls back to the chunk summaries when the synthesis call fails for a reason of its own', async () => {
+    conversations([16, 2, 2, 2]);
+    script([ok, ok, api(400), ok, ok, ok]);
+
+    await run();
+
+    expect(summaryText(0)).toBe('Did a thing. Did a thing.');
+    for (const n of [1, 2, 3]) expect(summaryText(n)).toBe('Did a thing.');
+  });
+
+  it('counts a timeout inside a long conversation\'s chunk call as a suspect failure', async () => {
+    conversations([16, 16, 2, 2]);
+    script([hang, hang]);
+
+    const result = await run();
+
+    expect(calls()).toBe(2);
+    expect(result.errors.filter(e => e.error.startsWith('Summary generation skipped:'))).toHaveLength(2);
+    expect(result.summaryStop).toBe('other');
+  });
+
+  // D2: the stop and the suspect count belong to one source directory.
+  it('does not carry a stop from one source directory to the next', async () => {
+    const src2 = join(dir, 'projects2');
+    mkdirSync(join(src2, 'projb'), { recursive: true });
+    conversations([2]);
+    writeFileSync(join(src2, 'projb', `${IDS[1]}.jsonl`), lines(IDS[1], 2));
+    script([api(529), ok]);
+
+    const first = await syncConversations(src, dest, { skipIndex: true });
+    const second = await syncConversations(src2, dest, { skipIndex: true });
+
+    expect(first.summaryStop).toBe('other');
+    expect(second.summaryStop).toBeUndefined();
+    expect(readFileSync(join(dest, 'projb', `${IDS[1]}-summary.txt`), 'utf-8')).toBe('Did a thing.');
+  });
+
+  it('does not carry the suspect count from one source directory to the next', async () => {
+    const src2 = join(dir, 'projects2');
+    mkdirSync(join(src2, 'projb'), { recursive: true });
+    conversations([2, 2]);
+    writeFileSync(join(src2, 'projb', `${IDS[2]}.jsonl`), lines(IDS[2], 2));
+    writeFileSync(join(src2, 'projb', `${IDS[3]}.jsonl`), lines(IDS[3], 2));
+    script([hang, ok, hang, ok]);
+
+    const first = await syncConversations(src, dest, { skipIndex: true });
+    const second = await syncConversations(src2, dest, { skipIndex: true });
+
+    expect(first.summaryStop).toBeUndefined();
+    expect(second.summaryStop).toBeUndefined();
+    expect(readFileSync(join(dest, 'projb', `${IDS[3]}-summary.txt`), 'utf-8')).toBe('Did a thing.');
+  });
 });
 
 describe('a Codex conversation whose Claude fallback fails', () => {
@@ -254,5 +363,22 @@ describe('a Codex conversation whose Claude fallback fails', () => {
     expect(failure!.message).toMatch(/Codex/);
     expect(failure!.message).toMatch(/Not logged in/);
     expect(classifySummaryFailure(failure)).toBeNull();
+  });
+});
+
+// Behaviour: the "check your API configuration" hint is for summaries that all
+// failed for no stated reason; it is wrong after a stop that names its cause.
+describe('shouldHintApiConfiguration', () => {
+  it('hints when every summary attempt failed and no batch stopped on a named cause', () => {
+    expect(shouldHintApiConfiguration({ summaryFailures: 3, summarized: 0, stoppedOnService: false })).toBe(true);
+  });
+
+  it('does not hint after a stop that names its cause', () => {
+    expect(shouldHintApiConfiguration({ summaryFailures: 3, summarized: 0, stoppedOnService: true })).toBe(false);
+  });
+
+  it('does not hint when some summary succeeded or none failed', () => {
+    expect(shouldHintApiConfiguration({ summaryFailures: 3, summarized: 1, stoppedOnService: false })).toBe(false);
+    expect(shouldHintApiConfiguration({ summaryFailures: 0, summarized: 0, stoppedOnService: false })).toBe(false);
   });
 });

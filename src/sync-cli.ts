@@ -1,4 +1,4 @@
-import { buildSyncOptionsFromEnv, syncConversations } from './sync.js';
+import { buildSyncOptionsFromEnv, shouldHintApiConfiguration, syncConversations } from './sync.js';
 import {
   ConversationSourceHarness,
   getArchiveDir,
@@ -257,7 +257,7 @@ async function syncAll() {
 
     // Help diagnose silent summarization failures (#70)
     const summaryErrors = totals.errors.filter(e => e.error.startsWith('Summary generation failed'));
-    if (summaryErrors.length > 0 && totals.summarized === 0 && !totals.summaryStoppedOnService) {
+    if (shouldHintApiConfiguration({ summaryFailures: summaryErrors.length, summarized: totals.summarized, stoppedOnService: totals.summaryStoppedOnService })) {
       console.log(`\n💡 All ${summaryErrors.length} summarization attempts failed.`);
       console.log(`  Check your API configuration (EPISODIC_MEMORY_API_BASE_URL / ANTHROPIC_API_KEY).`);
     }

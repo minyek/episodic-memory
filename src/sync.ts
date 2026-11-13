@@ -109,6 +109,16 @@ export interface SyncResult {
   summaryStop?: 'auth' | 'other';
 }
 
+/**
+ * Whether the sync report should suggest checking the API configuration: every
+ * summary attempt failed and no batch stopped on a cause it already named.
+ */
+export function shouldHintApiConfiguration(
+  report: { summaryFailures: number; summarized: number; stoppedOnService: boolean },
+): boolean {
+  return report.summaryFailures > 0 && report.summarized === 0 && !report.stoppedOnService;
+}
+
 export interface SyncOptions {
   skipIndex?: boolean;
   skipSummaries?: boolean;

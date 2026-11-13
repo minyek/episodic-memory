@@ -20,6 +20,15 @@ export interface SyncResult {
     /** Set when the summary batch stopped on a global or repeated failure: 'auth', or 'other' (service, credit, timeouts). */
     summaryStop?: 'auth' | 'other';
 }
+/**
+ * Whether the sync report should suggest checking the API configuration: every
+ * summary attempt failed and no batch stopped on a cause it already named.
+ */
+export declare function shouldHintApiConfiguration(report: {
+    summaryFailures: number;
+    summarized: number;
+    stoppedOnService: boolean;
+}): boolean;
 export interface SyncOptions {
     skipIndex?: boolean;
     skipSummaries?: boolean;
