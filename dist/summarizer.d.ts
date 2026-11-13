@@ -53,6 +53,27 @@ export declare function isProcessExitFailure(error: unknown): boolean;
  * threw a plain Error.
  */
 export declare function isAuthFailure(error: unknown): boolean;
+/**
+ * A Codex conversation's Claude fallback failed after Codex did. The failure is
+ * that conversation's own (the Codex path needs no Claude login or capacity), so
+ * classifySummaryFailure never treats it as global, whatever its text says.
+ */
+export declare class CodexFallbackError extends Error {
+    constructor(codexError: unknown, claudeError: unknown);
+}
+export interface SummaryFailureClass {
+    /** global: the whole batch will fail the same way; suspect: may be one conversation's own. */
+    kind: 'global' | 'suspect';
+    cause: string;
+}
+/**
+ * Classifies a summarizer failure for the batch loop in sync. Global failures
+ * (auth, an overloaded, rate-limited or unavailable service, an empty credit
+ * balance) stop the batch at once. Suspect failures (a timeout, another 5xx)
+ * can be one conversation's own, so they stop the batch only when they repeat.
+ * Anything else, a 400 included, is that conversation's own.
+ */
+export declare function classifySummaryFailure(error: unknown): SummaryFailureClass | null;
 export interface CodexSummarizerCommand {
     command: string;
     args: string[];
@@ -62,17 +83,8 @@ export interface CodexSummarizerCommand {
     versionArgs?: string[];
     skipVersionCheck?: boolean;
 }
-/**
- * Get API environment overrides for summarization calls.
- * Returns full env merged with process.env so subprocess inherits PATH, HOME, etc.
- *
- * Env vars (all optional):
- * - EPISODIC_MEMORY_API_MODEL: Model to use (default: haiku)
- * - EPISODIC_MEMORY_API_MODEL_FALLBACK: Fallback model on error (default: sonnet)
- * - EPISODIC_MEMORY_API_BASE_URL: Custom API endpoint
- * - EPISODIC_MEMORY_API_TOKEN: Auth token for custom endpoint
- * - EPISODIC_MEMORY_API_TIMEOUT_MS: Timeout for API calls (default: SDK default)
- */
+/** Test hook: lets the invalid-override warning fire again. */
+export declare function resetApiRetriesWarningForTests(): void;
 export declare function getApiEnv(): Record<string, string | undefined> | undefined;
 /**
  * Detect whether the current process is running inside the Claude Agent SDK
@@ -172,4 +184,6 @@ export declare function runCodexCommand(command: CodexSummarizerCommand): Promis
  * See https://github.com/obra/episodic-memory/issues/98.
  */
 export declare function getCodexModel(_exchanges: ConversationExchange[]): string | undefined;
+/** True when a conversation needs no model call: nothing to summarize. */
+export declare function isTrivialConversation(exchanges: ConversationExchange[]): boolean;
 export declare function summarizeConversation(exchanges: ConversationExchange[], sessionId?: string): Promise<string>;

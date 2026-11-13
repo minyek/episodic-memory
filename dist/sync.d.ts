@@ -17,6 +17,8 @@ export interface SyncResult {
         file: string;
         error: string;
     }>;
+    /** Set when the summary batch stopped on a global or repeated failure: 'auth', or 'other' (service, credit, timeouts). */
+    summaryStop?: 'auth' | 'other';
 }
 export interface SyncOptions {
     skipIndex?: boolean;
