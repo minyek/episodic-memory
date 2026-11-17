@@ -272,7 +272,7 @@ export function importCursorLegacy(options: CursorLegacyImportOptions): CursorLe
           fs.writeFileSync(outFile, finalLines.join('\n') + '\n', 'utf-8');
 
           // Stamp the conversation's end time so mtime-based fallbacks and
-          // copyIfNewer comparisons reflect when it actually happened.
+          // sync's archive freshness comparisons reflect when it actually happened.
           const mtime =
             toIsoTimestamp(composer.lastUpdatedAt) ?? lastTimestamp;
           const mtimeDate = new Date(mtime);
