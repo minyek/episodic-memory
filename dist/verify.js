@@ -4,6 +4,7 @@ import { parseConversation } from './parser.js';
 import { initDatabase, getAllExchanges, getFileLastIndexed } from './db.js';
 import { getArchiveDir, getExcludedProjects, findJsonlFiles, statIfExists } from './paths.js';
 import { isErroredSentinel } from './summary-sentinel.js';
+import { shouldSkipConversation } from './sync.js';
 export async function verifyIndex() {
     const result = {
         missing: [],
@@ -119,19 +120,13 @@ export async function repairIndex(issues) {
             const project = relativePath.split(path.sep)[0];
             // Parse conversation
             const exchanges = await parseConversation(conversationPath, project, conversationPath);
+            if (shouldSkipConversation(conversationPath)) {
+                console.log(`  Skipped (DO NOT INDEX marker)`);
+                continue;
+            }
             if (exchanges.length === 0) {
                 console.log(`  Skipped (no exchanges)`);
                 continue;
-            }
-            // Generate/update summary
-            const summaryPath = conversationPath.replace('.jsonl', '-summary.txt');
-            try {
-                const summary = await summarizeConversation(exchanges);
-                fs.writeFileSync(summaryPath, summary, 'utf-8');
-                console.log(`  Created summary: ${summary.split(/\s+/).length} words`);
-            }
-            catch (error) {
-                console.error(`  Summary failed, indexing anyway: ${error instanceof Error ? error.message : String(error)}`);
             }
             // Index exchanges
             for (const exchange of exchanges) {
@@ -140,6 +135,17 @@ export async function repairIndex(issues) {
                 insertExchange(db, exchange, embedding, toolNames);
             }
             console.log(`  Indexed ${exchanges.length} exchanges`);
+            // Summarise after indexing: a summary failure must not leave the
+            // conversation unsearchable.
+            const summaryPath = conversationPath.replace('.jsonl', '-summary.txt');
+            try {
+                const summary = await summarizeConversation(exchanges);
+                fs.writeFileSync(summaryPath, summary, 'utf-8');
+                console.log(`  Created summary: ${summary.split(/\s+/).length} words`);
+            }
+            catch (error) {
+                console.error(`  Summary failed (the conversation is indexed): ${error instanceof Error ? error.message : String(error)}`);
+            }
         }
         catch (error) {
             console.error(`Failed to re-index ${conversationPath}:`, error);

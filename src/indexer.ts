@@ -9,6 +9,7 @@ import { ConversationExchange } from './types.js';
 import { getArchiveDir, getExcludedProjects, getConversationSourceDirs, findJsonlFiles, statIfExists } from './paths.js';
 import { formatErrorSentinel, shouldQueueForSummary } from './summary-sentinel.js';
 import { getMaxMessageBytes, isOversizeExchange } from './message-size.js';
+import { shouldSkipConversation } from './sync.js';
 
 // Set max output tokens for Claude SDK (used by summarizer)
 process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = '20000';
@@ -124,6 +125,11 @@ export async function indexConversations(
         exchanges = await parseConversation(sourcePath, project, archivePath);
       } catch (error) {
         console.log(`  Skipped ${file} (read failed: ${error instanceof Error ? error.message : error})`);
+        continue;
+      }
+
+      if (shouldSkipConversation(sourcePath)) {
+        console.log(`  Skipped ${file} (DO NOT INDEX marker)`);
         continue;
       }
 
@@ -257,6 +263,12 @@ export async function indexSession(sessionId: string, concurrency: number = 1, n
         break;
       }
 
+      if (shouldSkipConversation(sourcePath)) {
+        console.log(`Skipped ${file} (DO NOT INDEX marker)`);
+        db.close();
+        break;
+      }
+
       if (exchanges.length > 0) {
         // Generate summary (unless --no-summaries)
         const summaryPath = archivePath.replace('.jsonl', '-summary.txt');
@@ -309,6 +321,19 @@ export async function indexSession(sessionId: string, concurrency: number = 1, n
 
   if (!found) {
     console.log(`Session ${sessionId} not found`);
+  }
+}
+
+// Copy through a temp file and rename, as sync does: a process that dies
+// mid-copy must not leave a truncated archive copy under the final name.
+function replaceArchiveCopy(source: string, dest: string): void {
+  const tempDest = `${dest}.tmp.${process.pid}`;
+  try {
+    fs.copyFileSync(source, tempDest);
+    fs.renameSync(tempDest, dest);
+  } catch (error) {
+    fs.rmSync(tempDest, { force: true });
+    throw error;
   }
 }
 
@@ -367,11 +392,12 @@ export async function indexUnprocessed(concurrency: number = 1, noSummaries: boo
 
         // Refresh the archive when the source may have grown beyond what we've seen.
         if (!fs.existsSync(archivePath) || maxIndexedLine > 0) {
-          fs.copyFileSync(sourcePath, archivePath);
+          replaceArchiveCopy(sourcePath, archivePath);
         }
 
         // Parse and filter to exchanges past the high-water mark
         const exchanges = await parseConversation(sourcePath, project, archivePath);
+        if (shouldSkipConversation(sourcePath)) continue; // DO NOT INDEX marker
         const newExchanges = maxIndexedLine > 0
           ? exchanges.filter(e => e.lineStart > maxIndexedLine)
           : exchanges;

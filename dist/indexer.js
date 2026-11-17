@@ -7,6 +7,7 @@ import { summarizeConversation } from './summarizer.js';
 import { getArchiveDir, getExcludedProjects, getConversationSourceDirs, findJsonlFiles, statIfExists } from './paths.js';
 import { formatErrorSentinel, shouldQueueForSummary } from './summary-sentinel.js';
 import { getMaxMessageBytes, isOversizeExchange } from './message-size.js';
+import { shouldSkipConversation } from './sync.js';
 // Set max output tokens for Claude SDK (used by summarizer)
 process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = '20000';
 // Increase max listeners for concurrent API calls
@@ -84,6 +85,10 @@ export async function indexConversations(limitToProject, maxConversations, concu
                 }
                 catch (error) {
                     console.log(`  Skipped ${file} (read failed: ${error instanceof Error ? error.message : error})`);
+                    continue;
+                }
+                if (shouldSkipConversation(sourcePath)) {
+                    console.log(`  Skipped ${file} (DO NOT INDEX marker)`);
                     continue;
                 }
                 if (exchanges.length === 0) {
@@ -198,6 +203,11 @@ export async function indexSession(sessionId, concurrency = 1, noSummaries = fal
                     db.close();
                     break;
                 }
+                if (shouldSkipConversation(sourcePath)) {
+                    console.log(`Skipped ${file} (DO NOT INDEX marker)`);
+                    db.close();
+                    break;
+                }
                 if (exchanges.length > 0) {
                     // Generate summary (unless --no-summaries)
                     const summaryPath = archivePath.replace('.jsonl', '-summary.txt');
@@ -248,6 +258,19 @@ export async function indexSession(sessionId, concurrency = 1, noSummaries = fal
         console.log(`Session ${sessionId} not found`);
     }
 }
+// Copy through a temp file and rename, as sync does: a process that dies
+// mid-copy must not leave a truncated archive copy under the final name.
+function replaceArchiveCopy(source, dest) {
+    const tempDest = `${dest}.tmp.${process.pid}`;
+    try {
+        fs.copyFileSync(source, tempDest);
+        fs.renameSync(tempDest, dest);
+    }
+    catch (error) {
+        fs.rmSync(tempDest, { force: true });
+        throw error;
+    }
+}
 export async function indexUnprocessed(concurrency = 1, noSummaries = false) {
     console.log('Finding unprocessed conversations...');
     if (concurrency > 1)
@@ -285,10 +308,12 @@ export async function indexUnprocessed(concurrency = 1, noSummaries = false) {
                     fs.mkdirSync(path.dirname(archivePath), { recursive: true });
                     // Refresh the archive when the source may have grown beyond what we've seen.
                     if (!fs.existsSync(archivePath) || maxIndexedLine > 0) {
-                        fs.copyFileSync(sourcePath, archivePath);
+                        replaceArchiveCopy(sourcePath, archivePath);
                     }
                     // Parse and filter to exchanges past the high-water mark
                     const exchanges = await parseConversation(sourcePath, project, archivePath);
+                    if (shouldSkipConversation(sourcePath))
+                        continue; // DO NOT INDEX marker
                     const newExchanges = maxIndexedLine > 0
                         ? exchanges.filter(e => e.lineStart > maxIndexedLine)
                         : exchanges;
