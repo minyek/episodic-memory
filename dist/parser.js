@@ -890,7 +890,7 @@ async function parseCursorConversation(filePath, projectName, archivePath) {
         crlfDelay: Infinity
     });
     // Live Cursor transcripts carry no per-message timestamps; fall back to the
-    // file mtime (preserved from the source by sync's copyIfNewer). Legacy
+    // file mtime (preserved from the source by sync). Legacy
     // exports from import-cursor-history embed real per-message timestamps.
     let fallbackTimestamp;
     try {

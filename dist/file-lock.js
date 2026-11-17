@@ -28,13 +28,13 @@ import fs from 'fs';
 import path from 'path';
 import * as lockfile from 'proper-lockfile';
 /**
- * Default stale threshold for the underlying proper-lockfile mtime heartbeat.
- * 10 minutes is well above the longest expected sync (a few minutes for a
- * cold start with hundreds of pending summaries) and the longest expected
- * embedding migration batch (seconds).
+ * Default stale threshold for the underlying proper-lockfile mtime heartbeat,
+ * which refreshes the lock every half threshold. Only a holder whose event loop
+ * stops for 10 minutes (a crash, a hang, a long host suspend) leaves a lock
+ * others may take.
  */
 const DEFAULT_STALE_MS = 10 * 60 * 1000;
-export function acquireFileLock(lockPath) {
+export function acquireFileLock(lockPath, options = {}) {
     fs.mkdirSync(path.dirname(lockPath), { recursive: true });
     // proper-lockfile expects the target path to exist. Touch it if missing —
     // 'a' (append, create if missing) leaves any existing PID intact.
@@ -44,12 +44,21 @@ export function acquireFileLock(lockPath) {
     catch (err) {
         throw err;
     }
+    const onLost = options.onCompromised;
     let release;
     try {
         release = lockfile.lockSync(lockPath, {
             realpath: false,
             retries: 0,
-            stale: DEFAULT_STALE_MS,
+            stale: options.stale ?? DEFAULT_STALE_MS,
+            ...(options.update !== undefined && { update: options.update }),
+            ...(options.fs !== undefined && { fs: options.fs }),
+            ...(onLost && {
+                onCompromised: () => {
+                    const kind = fs.existsSync(`${lockPath}.lock`) ? 'taken-over' : 'vanished';
+                    onLost(kind, readLockHolder(lockPath));
+                },
+            }),
         });
     }
     catch (err) {
@@ -66,13 +75,16 @@ export function acquireFileLock(lockPath) {
     return { path: lockPath, release };
 }
 export function releaseFileLock(handle) {
+    // Remove our diagnostic file before the lock directory: once the directory
+    // is gone a successor can acquire and write its own PID file, which this
+    // release must not delete.
     try {
-        handle.release();
+        if (readLockHolder(handle.path) === process.pid)
+            fs.unlinkSync(handle.path);
     }
     catch { }
-    // Clean up the diagnostic file. A subsequent acquirer will recreate it.
     try {
-        fs.unlinkSync(handle.path);
+        handle.release();
     }
     catch { }
 }
@@ -89,4 +101,8 @@ export function readLockHolder(lockPath) {
     catch {
         return null;
     }
+}
+/** Names a lock's holder in a diagnostic line: its PID, or "another process" when no PID was recorded. */
+export function describeLockHolder(pid) {
+    return pid !== null ? `pid ${pid}` : 'another process';
 }

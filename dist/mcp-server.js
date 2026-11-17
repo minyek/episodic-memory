@@ -29600,6 +29600,11 @@ function initDatabase() {
       embedding FLOAT[384]
     )
   `);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS pending_index (
+      archive_path TEXT PRIMARY KEY
+    )
+  `);
   migrateSchema(db);
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_timestamp ON exchanges(timestamp DESC)
@@ -29628,20 +29633,33 @@ function initDatabase() {
   return db;
 }
 
+// src/env-count.ts
+function parseEnvCount(raw, count, warn) {
+  if (raw === void 0) return count.fallback;
+  if (raw === "0") return 0;
+  if (/^[1-9][0-9]*$/.test(raw)) return Number.parseInt(raw, 10);
+  warn(`episodic-memory: ignoring invalid ${count.name}=${JSON.stringify(raw)}; using ${count.fallback} ${count.unit}`);
+  return count.fallback;
+}
+
 // src/embeddings.ts
 var MODEL_ID = "Xenova/bge-small-en-v1.5";
 var MODEL_DTYPE = "q8";
 var BGE_QUERY_PREFIX = "Represent this sentence for searching relevant passages: ";
+var DEFAULT_INTRA_OP_THREADS = 2;
 function resolveIntraOpThreads() {
-  const override = process.env.EPISODIC_MEMORY_EMBED_THREADS;
-  if (override !== void 0) {
-    const n = Number.parseInt(override, 10);
-    return Number.isFinite(n) && n > 0 ? n : null;
-  }
-  if (process.platform === "darwin" && process.arch === "arm64") {
-    return 2;
-  }
-  return null;
+  const threads = parseEnvCount(
+    process.env.EPISODIC_MEMORY_EMBED_THREADS,
+    { name: "EPISODIC_MEMORY_EMBED_THREADS", fallback: DEFAULT_INTRA_OP_THREADS, unit: "threads" },
+    (message) => console.error(message)
+  );
+  return threads === 0 ? null : threads;
+}
+function buildEmbeddingSessionOptions(intraOpThreads) {
+  return {
+    ...intraOpThreads !== null && { intraOpNumThreads: intraOpThreads, interOpNumThreads: 1 },
+    extra: { "session.intra_op.allow_spinning": "0" }
+  };
 }
 var embeddingPipeline = null;
 var EmbeddingsUnavailableError = class extends Error {
@@ -29668,15 +29686,9 @@ async function initEmbeddings() {
   const options = {
     dtype: MODEL_DTYPE,
     progress_callback: () => {
-    }
+    },
+    session_options: buildEmbeddingSessionOptions(resolveIntraOpThreads())
   };
-  const intraOpThreads = resolveIntraOpThreads();
-  if (intraOpThreads !== null) {
-    options.session_options = {
-      intraOpNumThreads: intraOpThreads,
-      interOpNumThreads: 1
-    };
-  }
   embeddingPipeline = await pipeline("feature-extraction", MODEL_ID, options);
   console.error("Embedding model loaded");
 }
