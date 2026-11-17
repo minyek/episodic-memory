@@ -28,7 +28,26 @@ export interface FileLockHandle {
     path: string;
     release: () => void;
 }
-export declare function acquireFileLock(lockPath: string): FileLockHandle | null;
+/**
+ * Why a held lock stopped being ours: another process took the directory over
+ * ('taken-over'), or the directory disappeared ('vanished').
+ */
+export type CompromiseKind = 'taken-over' | 'vanished';
+export interface AcquireOptions {
+    /**
+     * Called from the heartbeat timer when the lock is no longer ours. Without a
+     * handler the library's default applies: it throws from the timer, which
+     * stops the holder.
+     */
+    onCompromised?: (kind: CompromiseKind, holderPid: number | null) => void;
+    /** Filesystem the lock library calls through; a replacement can observe or pause each call. */
+    fs?: object;
+    /** Milliseconds after which an unrefreshed lock may be taken over. */
+    stale?: number;
+    /** Milliseconds between heartbeats. */
+    update?: number;
+}
+export declare function acquireFileLock(lockPath: string, options?: AcquireOptions): FileLockHandle | null;
 export declare function releaseFileLock(handle: FileLockHandle): void;
 /**
  * Read the recorded holder PID from a lock file's diagnostic content.
@@ -36,3 +55,5 @@ export declare function releaseFileLock(handle: FileLockHandle): void;
  * The PID is informational only — the real mutex lives in `<lockPath>.lock/`.
  */
 export declare function readLockHolder(lockPath: string): number | null;
+/** Names a lock's holder in a diagnostic line: its PID, or "another process" when no PID was recorded. */
+export declare function describeLockHolder(pid: number | null): string;

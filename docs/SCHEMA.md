@@ -73,6 +73,16 @@ CREATE VIRTUAL TABLE vec_exchanges USING vec0(
 );
 ```
 
+### `pending_index`
+
+Archive copies a sync has written whose index attempt has not finished. The sync walk inserts a copy's archive path before the copy is renamed into place; the index loop deletes it after the file's index attempt. A row left by a sync that stopped early makes the next sync index that copy from the high-water mark. Only `sync` writes rows; `index-cli rebuild` deletes the table with the database.
+
+```sql
+CREATE TABLE pending_index (
+  archive_path TEXT PRIMARY KEY  -- Absolute path of the archived conversation, as in exchanges.archive_path
+);
+```
+
 ## Indexes
 
 ```sql

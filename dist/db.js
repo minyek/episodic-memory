@@ -156,6 +156,13 @@ export function initDatabase() {
       embedding FLOAT[384]
     )
   `);
+    // Archive copies a sync has written whose index attempt has not finished
+    // (sync.ts is the only writer).
+    db.exec(`
+    CREATE TABLE IF NOT EXISTS pending_index (
+      archive_path TEXT PRIMARY KEY
+    )
+  `);
     // Run migrations first
     migrateSchema(db);
     // Create indexes (after migrations ensure columns exist)
@@ -227,6 +234,16 @@ export function getFileLastIndexed(db, archivePath) {
   `);
     const row = stmt.get(archivePath);
     return row.lastIndexed;
+}
+export function markIndexPending(db, archivePath) {
+    db.prepare('INSERT OR IGNORE INTO pending_index (archive_path) VALUES (?)').run(archivePath);
+}
+export function clearIndexPending(db, archivePath) {
+    db.prepare('DELETE FROM pending_index WHERE archive_path = ?').run(archivePath);
+}
+export function listIndexPending(db) {
+    const rows = db.prepare('SELECT archive_path FROM pending_index').all();
+    return new Set(rows.map(r => r.archive_path));
 }
 export function deleteExchange(db, id) {
     // Delete from vector table

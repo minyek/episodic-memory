@@ -1,4 +1,4 @@
-import { mkdtempSync } from 'fs';
+import { mkdtempSync, mkdirSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
@@ -13,6 +13,16 @@ const isolatedRoot = mkdtempSync(join(tmpdir(), 'episodic-memory-vitest-'));
 process.env.EPISODIC_MEMORY_CONFIG_DIR = join(isolatedRoot, 'superpowers');
 process.env.CLAUDE_CONFIG_DIR = join(isolatedRoot, 'claude');
 process.env.CODEX_HOME = join(isolatedRoot, 'codex');
+
+// The per-user sync lock lives in XDG_RUNTIME_DIR or the temp dir. Point both
+// inside the isolated root so no test takes, or waits on, the developer's real
+// per-user lock.
+const isolatedRuntime = join(isolatedRoot, 'runtime');
+const isolatedTmp = join(isolatedRoot, 'tmp');
+mkdirSync(isolatedRuntime, { recursive: true });
+mkdirSync(isolatedTmp, { recursive: true });
+process.env.XDG_RUNTIME_DIR = isolatedRuntime;
+process.env.TMPDIR = isolatedTmp;
 
 // Clear any ambient summarizer-billing signals so tests get deterministic
 // cost-guard (#104) and timeout (#160) behavior regardless of the developer's

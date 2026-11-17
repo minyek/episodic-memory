@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- A background sync can no longer take over your CPU. Embedding used one worker per core with idle workers spinning, and a sync had no deadline, so a handful of overlapping syncs could hold most of a many-core machine for hours (13 syncs used about 22 of 32 cores for up to 7 hours in one report). Embedding is now capped at 2 threads on every platform with spin-waiting off (`EPISODIC_MEMORY_EMBED_THREADS` to change; 0 restores the onnxruntime default). The detached background sync runs at nice 10, takes one per-user lock that holds across different `HOME` and temp directories, and stops after 30 minutes (`EPISODIC_MEMORY_SYNC_TIMEOUT_MS`), exiting with code 124. A stopped sync loses no conversation: archived files are recorded and the next sync indexes them. Foreground `sync` and `index` are unchanged.
+
 ## [1.6.0] - 2026-09-08
 
 Adds a fifth conversation source, an off switch for automatic syncing, and two fixes for real-world resource problems.
