@@ -48,10 +48,11 @@ function exchangeLines(sessionId: string, marker: string): string {
   return user + '\n' + assistant + '\n';
 }
 
-// Behaviour (spec AC 6, invariant 3): a sync that stops part-way through
-// indexing leaves no conversation that later syncs skip without having
-// indexed: a file's archive copy is stamped current only after its index
-// attempt, so the next sync does the rest.
+// Behaviour: a sync that stops part-way through indexing leaves no
+// conversation that later syncs skip without having indexed. Each copy stays
+// recorded in pending_index until its index attempt ends; on a filesystem that
+// rounds times up a copy can look current before it is indexed, and the next
+// sync still indexes it.
 describe('sync resumes after an interrupted index run', () => {
   let testDir: string;
   let sourceDir: string;
@@ -161,6 +162,35 @@ describe('sync resumes after an interrupted index run', () => {
     db.close();
     expect(rows.map(r => r.n)).toEqual([1, 1, 1]);
   });
+  it('clears the pending record of a copy it does not index', async () => {
+    appendFileSync(join(sourceDir, 'proj', `${files[0].id}.jsonl`),
+      '<INSTRUCTIONS-TO-EPISODIC-MEMORY>DO NOT INDEX THIS CHAT</INSTRUCTIONS-TO-EPISODIC-MEMORY>\n');
+    await syncConversations(sourceDir, destDir, { skipSummaries: true });
+
+    const db = new Database(dbPath, { readonly: true });
+    const pending = db.prepare('SELECT COUNT(*) AS n FROM pending_index').get() as { n: number };
+    db.close();
+    expect(pending.n).toBe(0);
+  });
+
+  it('reports nothing when a source with a pending record has grown since the interrupted run', async () => {
+    embedState.hangOn = 'bravo-two';
+    const reached = new Promise<void>((resolve) => { embedState.reachedHang = resolve; });
+    void syncConversations(sourceDir, destDir, { skipSummaries: true });
+    await reached;
+
+    const grown = join(sourceDir, 'proj', `${files[2].id}.jsonl`);
+    appendFileSync(grown, exchangeLines(`${files[2].id}-late`, 'charlie-late'));
+    const later = new Date(Date.now() + 5000);
+    utimesSync(grown, later, later);
+    embedState.hangOn = null;
+    embedState.reachedHang = null;
+    const result = await syncConversations(sourceDir, destDir, { skipSummaries: true });
+
+    expect(result.errors).toEqual([]);
+    expect(embedState.embedded.some(u => u.includes('charlie-late'))).toBe(true);
+  });
+
   // Stands in for a filesystem that stores file times its own way: each
   // mtime sync sets is stored as storedAs(requested), in seconds.
   function storeFileTimesAs(storedAs: (seconds: number) => number): void {
@@ -169,9 +199,9 @@ describe('sync resumes after an interrupted index run', () => {
       realUtimes(p, atime, storedAs(Number(mtime)))) as typeof fs.utimesSync);
   }
 
-  // Inv 3 (D8) on a filesystem that rounds times up to 2 s: the walk copy is
-  // still stamped below its source, so the next sync indexes what an
-  // abandoned run did not.
+  // On a filesystem that rounds times up to 2 s a copy can look current before
+  // it is indexed; it stays recorded in pending_index, so the next sync still
+  // indexes what an abandoned run did not.
   it('resumes an abandoned run on a filesystem that rounds file times up to 2 s', async () => {
     storeFileTimesAs(s => Math.ceil(s / 2) * 2);
     embedState.hangOn = 'bravo-two';
