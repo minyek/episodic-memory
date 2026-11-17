@@ -32,7 +32,7 @@ export declare class SummarizerSdkError extends Error {
  *   subtype 'success', so the bare-subtype check missed it and the fallback
  *   never fired.
  * Auth failures also use subtype 'success' — those are NOT resume-specific and
- * are excluded here (401/429/529 return false); isAuthFailure handles them.
+ * are excluded here (401/429/529 return false); classifySummaryFailure classifies them.
  */
 export declare function isResumeFailure(error: unknown): boolean;
 /**
@@ -53,6 +53,29 @@ export declare function isProcessExitFailure(error: unknown): boolean;
  * threw a plain Error.
  */
 export declare function isAuthFailure(error: unknown): boolean;
+/**
+ * A Codex conversation's Claude fallback failed after Codex did. The failure is
+ * that conversation's own (the Codex path needs no Claude login or capacity), so
+ * classifySummaryFailure never treats it as global, whatever its text says.
+ */
+export declare class CodexFallbackError extends Error {
+    constructor(codexError: unknown, claudeError: unknown);
+}
+export interface SummaryFailureClass {
+    /** global: the whole batch will fail the same way; suspect: may be one conversation's own. */
+    kind: 'global' | 'suspect';
+    cause: string;
+    /** True when the login failed, so the user must re-authenticate. */
+    auth: boolean;
+}
+/**
+ * Classifies a summarizer failure for the batch loop in sync. Global failures
+ * (auth, an overloaded, rate-limited or unavailable service, an empty credit
+ * balance) stop the batch at once. Suspect failures (a timeout, another 5xx)
+ * can be one conversation's own, so they stop the batch only when they repeat.
+ * Anything else, a 400 included, is that conversation's own.
+ */
+export declare function classifySummaryFailure(error: unknown): SummaryFailureClass | null;
 export interface CodexSummarizerCommand {
     command: string;
     args: string[];
@@ -62,6 +85,8 @@ export interface CodexSummarizerCommand {
     versionArgs?: string[];
     skipVersionCheck?: boolean;
 }
+/** Test hook: lets the invalid-override warning fire again. */
+export declare function resetApiRetriesWarningForTests(): void;
 /**
  * Get API environment overrides for summarization calls.
  * Returns full env merged with process.env so subprocess inherits PATH, HOME, etc.
@@ -72,6 +97,10 @@ export interface CodexSummarizerCommand {
  * - EPISODIC_MEMORY_API_BASE_URL: Custom API endpoint
  * - EPISODIC_MEMORY_API_TOKEN: Auth token for custom endpoint
  * - EPISODIC_MEMORY_API_TIMEOUT_MS: Timeout for API calls (default: SDK default)
+ * - EPISODIC_MEMORY_API_MAX_RETRIES: Retries the subprocess makes against a failing
+ *   API before it reports the error (default: 2). The subprocess also runs with its
+ *   retry watchdog off: in watchdog mode it retries 429 and 529 past this count for
+ *   minutes to hours with no output, which a caller sees only as a timeout.
  */
 export declare function getApiEnv(): Record<string, string | undefined> | undefined;
 /**
@@ -172,4 +201,6 @@ export declare function runCodexCommand(command: CodexSummarizerCommand): Promis
  * See https://github.com/obra/episodic-memory/issues/98.
  */
 export declare function getCodexModel(_exchanges: ConversationExchange[]): string | undefined;
+/** True when a conversation needs no model call: nothing to summarize. */
+export declare function isTrivialConversation(exchanges: ConversationExchange[]): boolean;
 export declare function summarizeConversation(exchanges: ConversationExchange[], sessionId?: string): Promise<string>;

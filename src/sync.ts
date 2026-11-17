@@ -105,6 +105,18 @@ export interface SyncResult {
   indexed: number;
   summarized: number;
   errors: Array<{ file: string; error: string }>;
+  /** Set when the summary batch stopped on a global or repeated failure: 'auth', or 'other' (service, credit, timeouts). */
+  summaryStop?: 'auth' | 'other';
+}
+
+/**
+ * Whether the sync report should suggest checking the API configuration: every
+ * summary attempt failed and no batch stopped on a cause other than auth.
+ */
+export function shouldHintApiConfiguration(
+  report: { summaryFailures: number; summarized: number; stoppedOnNonAuthCause: boolean },
+): boolean {
+  return report.summaryFailures > 0 && report.summarized === 0 && !report.stoppedOnNonAuthCause;
 }
 
 export interface SyncOptions {
@@ -396,7 +408,7 @@ export async function syncConversations(
   // Generate summaries for files that need them
   if (!options.skipSummaries && filesToSummarize.length > 0) {
     const { parseConversation } = await import('./parser.js');
-    const { summarizeConversation, isAuthFailure } = await import('./summarizer.js');
+    const { summarizeConversation, classifySummaryFailure, isTrivialConversation } = await import('./summarizer.js');
 
     const summaryLimit = options.summaryLimit ?? 10;
     const toSummarize = filesToSummarize.slice(0, summaryLimit);
@@ -407,22 +419,26 @@ export async function syncConversations(
       console.log(`  (${remaining} more need summaries - will process on next sync)`);
     }
 
-    // A global failure (expired Claude CLI OAuth, #138) is not per-file. After
-    // the first, skip the rest of this batch with
-    // error sentinels so we don't burn minutes re-billing doomed calls or spam the
-    // same message per file. The skipped files re-queue on the next sync.
-    let stopBatch = false;
-    let stopBatchMessage = '';
+    // A global failure (an expired or missing Claude CLI login, an overloaded or
+    // rate-limited service, an empty credit balance) hits every conversation the
+    // same way, so the rest of this source's batch is not tried: its files get an
+    // error sentinel naming the cause and retry after the retry interval
+    // (EPISODIC_MEMORY_SUMMARY_ERROR_RETRY_HOURS, default 1 h). A suspect failure
+    // (a timeout, another 5xx) can be one conversation's own, so it stops the
+    // batch only when it repeats with no returned call in between.
+    let stopMessage: string | null = null;
+    let suspectInARow = 0;
+    const suspectFailuresToStop = 2;
 
     for (const { path: filePath, sessionId } of toSummarize) {
-      if (stopBatch) {
+      if (stopMessage !== null) {
         try {
           const summaryPath = filePath.replace('.jsonl', '-summary.txt');
-          fs.writeFileSync(summaryPath, formatErrorSentinel(new Error(stopBatchMessage)), 'utf-8');
+          fs.writeFileSync(summaryPath, formatErrorSentinel(new Error(stopMessage)), 'utf-8');
         } catch {}
         result.errors.push({
           file: filePath,
-          error: `Summary generation skipped: ${stopBatchMessage}`,
+          error: `Summary generation skipped: ${stopMessage}`,
         });
         continue;
       }
@@ -440,6 +456,7 @@ export async function syncConversations(
 
         console.log(`  Summarizing ${path.basename(filePath)} (${exchanges.length} exchanges)...`);
         const summary = await summarizeConversation(exchanges, sessionId);
+        if (!isTrivialConversation(exchanges)) suspectInARow = 0;
 
         const summaryPath = filePath.replace('.jsonl', '-summary.txt');
         fs.writeFileSync(summaryPath, summary, 'utf-8');
@@ -459,12 +476,18 @@ export async function syncConversations(
           error: `Summary generation failed: ${error instanceof Error ? error.message : String(error)}`
         });
 
-        // Stop the batch on a global failure (expired auth).
-        if (isAuthFailure(error)) {
-          stopBatch = true;
-          stopBatchMessage =
-            'Claude CLI authentication failed — run `claude` and re-authenticate; summaries will retry on the next sync.';
-          console.error(`  ${stopBatchMessage}`);
+        const failure = classifySummaryFailure(error);
+        if (failure === null) {
+          suspectInARow = 0;
+        } else if (failure.kind === 'suspect') {
+          suspectInARow++;
+        }
+        if (failure !== null && (failure.kind === 'global' || suspectInARow >= suspectFailuresToStop)) {
+          stopMessage =
+            `${failure.cause}; the remaining summaries retry after the retry interval ` +
+            '(EPISODIC_MEMORY_SUMMARY_ERROR_RETRY_HOURS, default 1 hour)';
+          result.summaryStop = failure.auth ? 'auth' : 'other';
+          console.error(`  Summarizing stopped: ${stopMessage}`);
         }
       }
     }

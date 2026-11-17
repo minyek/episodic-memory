@@ -232,6 +232,14 @@ export EPISODIC_MEMORY_API_TOKEN=your-token
 # Increase timeout for slow endpoints (milliseconds)
 export EPISODIC_MEMORY_API_TIMEOUT_MS=3000000
 
+# Retries the summarizer's Claude subprocess makes against a failing API before
+# it reports the error (default: 2; exactly 0 makes one attempt with no retry;
+# an empty or invalid value keeps 2 and says so). The subprocess always runs with
+# its retry watchdog off, whatever the parent environment says, so an overloaded
+# (529) or rate-limited (429) API is reported within seconds instead of being
+# retried for minutes to hours with no output.
+export EPISODIC_MEMORY_API_MAX_RETRIES=2
+
 # Override Codex binary path if needed (default: codex)
 export EPISODIC_MEMORY_CODEX_BIN=/path/to/codex
 
@@ -316,12 +324,14 @@ Codex summarization requires `codex-cli 0.130.0` or newer. If Codex app-server s
 
 | Component | Uses custom config? |
 |-----------|---------------------|
-| Summarization | Yes (up to 10 calls/sync) |
+| Summarization | Yes (by default up to 10 conversations per source directory per sync) |
 | Embeddings | No (local Transformers.js) |
 | Search | No (local SQLite) |
 | MCP tools | No |
 
 Summaries are display-only: they decorate search results and are never embedded or searched, so `EPISODIC_MEMORY_SKIP_SUMMARIES=1` costs you that line of context and nothing else.
+
+A sync's summary batch (one per source directory) stops at the first sign that the rest will fail the same way: an expired or missing login, an overloaded, rate-limited or unavailable API (HTTP 429, 503 or 529), or an empty credit balance. It also stops at the second consecutive timeout or other 5xx error. The conversations not tried get an error marker naming the cause and are tried again after `EPISODIC_MEMORY_SUMMARY_ERROR_RETRY_HOURS` (default 1 hour).
 
 ## Commands
 
