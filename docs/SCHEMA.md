@@ -75,7 +75,7 @@ CREATE VIRTUAL TABLE vec_exchanges USING vec0(
 
 ### `pending_index`
 
-Archive copies a sync has written whose index attempt has not finished. The sync walk inserts a copy's archive path before the copy is renamed into place; the index loop deletes it after the file's index attempt. A row left by a sync that stopped early makes the next sync index that copy from the high-water mark. Only `sync` writes rows; `index-cli rebuild` deletes the table with the database.
+Archive copies a sync has written whose index attempt has not finished. The sync walk inserts a copy's archive path before the copy is renamed into place; the index loop deletes it after the file's index attempt. A row left by a sync that stopped early makes the next sync index that copy from the high-water mark. Only `sync` writes and reads rows, once per source directory (foreground, the background child, and the opencode plugin's `--only opencode` run). The table is created empty by every opener of the database (`initDatabase`: sync, search, the index commands, verify), so a database written before this table existed gains it on its first open; older code ignores it. `index-cli rebuild` deletes the table with the database.
 
 ```sql
 CREATE TABLE pending_index (

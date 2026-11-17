@@ -242,8 +242,9 @@ async function syncAll() {
 }
 const MIGRATION_BATCH_SIZE = parseInt(process.env.EPISODIC_MEMORY_MIGRATION_BATCH || '500', 10);
 async function runEmbeddingMigrationPhase() {
-    const db = initDatabase();
+    let db = null;
     try {
+        db = initDatabase();
         const stale = countStale(db);
         if (stale === 0)
             return;
@@ -260,7 +261,7 @@ async function runEmbeddingMigrationPhase() {
         console.error('episodic-memory: migration phase error:', err instanceof Error ? err.message : err);
     }
     finally {
-        db.close();
+        db?.close();
     }
 }
 syncAll().catch(error => {

@@ -281,7 +281,7 @@ export async function syncConversations(sourceDir, destDir, options = {}) {
         }
     }
     // Index the files the walk copied or recorded as pending (unless skipIndex is set)
-    if (!options.skipIndex && index && filesToIndex.length > 0) {
+    if (index && filesToIndex.length > 0) {
         const { parseConversation } = await import('./parser.js');
         // Load the embedding backend first. It can fail on hosts where sharp's
         // native binding (pulled in transitively by @huggingface/transformers)
@@ -304,7 +304,7 @@ export async function syncConversations(sourceDir, destDir, options = {}) {
             console.error('episodic-memory: embedding backend failed to load; skipping semantic ' +
                 'indexing this run (copying and summaries still run). See the error above.');
         }
-        if (embeddings && index) {
+        if (embeddings) {
             const { db: indexDb, dbModule: { insertExchange, clearIndexPending } } = index;
             const { generateExchangeEmbedding } = embeddings;
             const maxMessageBytes = getMaxMessageBytes();
