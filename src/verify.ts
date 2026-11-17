@@ -4,6 +4,7 @@ import { parseConversation } from './parser.js';
 import { initDatabase, getAllExchanges, getFileLastIndexed } from './db.js';
 import { getArchiveDir, getExcludedProjects, findJsonlFiles, statIfExists } from './paths.js';
 import { isErroredSentinel } from './summary-sentinel.js';
+import { shouldSkipConversation } from './sync.js';
 
 export interface VerificationResult {
   missing: Array<{ path: string; reason: string }>;
@@ -153,19 +154,14 @@ export async function repairIndex(issues: VerificationResult): Promise<void> {
       // Parse conversation
       const exchanges = await parseConversation(conversationPath, project, conversationPath);
 
-      if (exchanges.length === 0) {
-        console.log(`  Skipped (no exchanges)`);
+      if (shouldSkipConversation(conversationPath)) {
+        console.log(`  Skipped (DO NOT INDEX marker)`);
         continue;
       }
 
-      // Generate/update summary
-      const summaryPath = conversationPath.replace('.jsonl', '-summary.txt');
-      try {
-        const summary = await summarizeConversation(exchanges);
-        fs.writeFileSync(summaryPath, summary, 'utf-8');
-        console.log(`  Created summary: ${summary.split(/\s+/).length} words`);
-      } catch (error) {
-        console.error(`  Summary failed, indexing anyway: ${error instanceof Error ? error.message : String(error)}`);
+      if (exchanges.length === 0) {
+        console.log(`  Skipped (no exchanges)`);
+        continue;
       }
 
       // Index exchanges
@@ -180,6 +176,17 @@ export async function repairIndex(issues: VerificationResult): Promise<void> {
       }
 
       console.log(`  Indexed ${exchanges.length} exchanges`);
+
+      // Summarise after indexing: a summary failure must not leave the
+      // conversation unsearchable.
+      const summaryPath = conversationPath.replace('.jsonl', '-summary.txt');
+      try {
+        const summary = await summarizeConversation(exchanges);
+        fs.writeFileSync(summaryPath, summary, 'utf-8');
+        console.log(`  Created summary: ${summary.split(/\s+/).length} words`);
+      } catch (error) {
+        console.error(`  Summary failed (the conversation is indexed): ${error instanceof Error ? error.message : String(error)}`);
+      }
     } catch (error) {
       console.error(`Failed to re-index ${conversationPath}:`, error);
     }

@@ -309,7 +309,7 @@ export async function syncConversations(
   }
 
   // Index the files the walk copied or recorded as pending (unless skipIndex is set)
-  if (!options.skipIndex && index && filesToIndex.length > 0) {
+  if (index && filesToIndex.length > 0) {
     const { parseConversation } = await import('./parser.js');
 
     // Load the embedding backend first. It can fail on hosts where sharp's
@@ -335,7 +335,7 @@ export async function syncConversations(
       );
     }
 
-    if (embeddings && index) {
+    if (embeddings) {
       const { db: indexDb, dbModule: { insertExchange, clearIndexPending } } = index;
       const { generateExchangeEmbedding } = embeddings;
 
