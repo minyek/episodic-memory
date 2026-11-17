@@ -8,7 +8,8 @@ import { exportOpencodeSessions } from './opencode-sync.js';
 import { spawn } from 'child_process';
 import fs from 'fs';
 import { formatLogLine, getSyncLogPath, getSyncLockPath } from './logging.js';
-import { acquireFileLock, readLockHolder, releaseFileLock } from './file-lock.js';
+import { acquireFileLock, describeLockHolder, readLockHolder, releaseFileLock } from './file-lock.js';
+import { BACKGROUND_CHILD_ENV, acquireUserSyncSlot, lowerBackgroundPriority, startBackgroundSyncLimits, startSyncDeadline, } from './sync-limits.js';
 const args = process.argv.slice(2);
 // Reentrancy guard (#87): if this sync was triggered by a SessionStart hook
 // inside a Claude subprocess that the summarizer just spawned, exit silently.
@@ -136,7 +137,8 @@ if (isBackground) {
         ...filteredArgs
     ], {
         detached: true,
-        stdio: ['ignore', logFd, logFd]
+        stdio: ['ignore', logFd, logFd],
+        env: { ...process.env, [BACKGROUND_CHILD_ENV]: '1' },
     });
     child.unref(); // Allow parent to exit
     console.log(`Sync started in background. Log: ${logPath}`);
@@ -175,21 +177,29 @@ if (sourceDirs.length === 0) {
 const syncLockPath = getSyncLockPath();
 const syncLock = acquireFileLock(syncLockPath);
 if (!syncLock) {
-    const holder = readLockHolder(syncLockPath);
-    const holderLabel = holder !== null ? `pid ${holder}` : 'another process';
-    console.error(`episodic-memory: sync already running (${holderLabel}); skipping`);
+    console.error(`episodic-memory: sync already running (${describeLockHolder(readLockHolder(syncLockPath))}); skipping`);
     process.exit(0);
 }
+let userSyncLock = null;
 const releaseSyncLockOnce = () => {
     if (releaseSyncLockOnce.done)
         return;
     releaseSyncLockOnce.done = true;
+    if (userSyncLock)
+        releaseFileLock(userSyncLock);
     releaseFileLock(syncLock);
 };
 process.on('exit', releaseSyncLockOnce);
 process.on('SIGINT', () => { releaseSyncLockOnce(); process.exit(130); });
 process.on('SIGTERM', () => { releaseSyncLockOnce(); process.exit(143); });
 process.on('SIGHUP', () => { releaseSyncLockOnce(); process.exit(129); });
+userSyncLock = startBackgroundSyncLimits(process.env, {
+    lowerPriority: () => lowerBackgroundPriority(),
+    acquireSlot: options => acquireUserSyncSlot(process.env, options),
+    startDeadline: startSyncDeadline,
+    log: message => console.error(message),
+    exit: code => process.exit(code),
+});
 console.log('Syncing conversations...');
 console.log(`Sources: ${sourceDirs.join(', ')}`);
 console.log(`Destination: ${destDir}\n`);
