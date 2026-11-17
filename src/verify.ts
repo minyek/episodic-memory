@@ -160,9 +160,13 @@ export async function repairIndex(issues: VerificationResult): Promise<void> {
 
       // Generate/update summary
       const summaryPath = conversationPath.replace('.jsonl', '-summary.txt');
-      const summary = await summarizeConversation(exchanges);
-      fs.writeFileSync(summaryPath, summary, 'utf-8');
-      console.log(`  Created summary: ${summary.split(/\s+/).length} words`);
+      try {
+        const summary = await summarizeConversation(exchanges);
+        fs.writeFileSync(summaryPath, summary, 'utf-8');
+        console.log(`  Created summary: ${summary.split(/\s+/).length} words`);
+      } catch (error) {
+        console.error(`  Summary failed, indexing anyway: ${error instanceof Error ? error.message : String(error)}`);
+      }
 
       // Index exchanges
       for (const exchange of exchanges) {

@@ -1,3 +1,4 @@
+import { parseEnvCount } from './env-count.js';
 import fs from 'fs';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { SUMMARIZER_CONTEXT_MARKER } from './constants.js';
@@ -57,7 +58,7 @@ export class SummarizerSdkError extends Error {
  *   subtype 'success', so the bare-subtype check missed it and the fallback
  *   never fired.
  * Auth failures also use subtype 'success' — those are NOT resume-specific and
- * are excluded here (401/429/529 return false); isAuthFailure handles them.
+ * are excluded here (401/429/529 return false); classifySummaryFailure classifies them.
  */
 export function isResumeFailure(error) {
     if (!(error instanceof SummarizerSdkError))
@@ -106,8 +107,67 @@ export function isAuthFailure(error) {
     return (text.includes('failed to authenticate') ||
         text.includes('authentication_error') ||
         text.includes('oauth access token') ||
+        text.includes('not logged in') ||
         text.includes('unauthorized') ||
         /\b401\b/.test(text));
+}
+/**
+ * A Codex conversation's Claude fallback failed after Codex did. The failure is
+ * that conversation's own (the Codex path needs no Claude login or capacity), so
+ * classifySummaryFailure never treats it as global, whatever its text says.
+ */
+export class CodexFallbackError extends Error {
+    constructor(codexError, claudeError) {
+        super(`Summary failed for a Codex conversation (Codex: ${codexError instanceof Error ? codexError.message : String(codexError)}; ` +
+            `Claude fallback: ${claudeError instanceof Error ? claudeError.message : String(claudeError)})`);
+        this.name = 'CodexFallbackError';
+    }
+}
+/**
+ * Classifies a summarizer failure for the batch loop in sync. Global failures
+ * (auth, an overloaded, rate-limited or unavailable service, an empty credit
+ * balance) stop the batch at once. Suspect failures (a timeout, another 5xx)
+ * can be one conversation's own, so they stop the batch only when they repeat.
+ * Anything else, a 400 included, is that conversation's own.
+ */
+export function classifySummaryFailure(error) {
+    if (error instanceof CodexFallbackError)
+        return null;
+    if (isAuthFailure(error)) {
+        return { kind: 'global', cause: 'Claude CLI authentication failed (run `claude` and re-authenticate)', auth: true };
+    }
+    if (error instanceof SummarizerTimeoutError) {
+        return { kind: 'suspect', cause: 'the summarizer timed out', auth: false };
+    }
+    if (error instanceof SummarizerSdkError) {
+        const status = error.apiErrorStatus;
+        if (status === 429)
+            return { kind: 'global', cause: 'the Claude API is rate limiting requests (HTTP 429)', auth: false };
+        if (status === 503 || status === 529) {
+            return { kind: 'global', cause: `the Claude API is overloaded or unavailable (HTTP ${status})`, auth: false };
+        }
+        if (status === 400 && /credit balance is too low/i.test(`${error.detail ?? ''} ${error.message}`)) {
+            return { kind: 'global', cause: 'the Claude account has no credit left (HTTP 400)', auth: false };
+        }
+        if (typeof status === 'number' && status >= 500 && status < 600) {
+            return { kind: 'suspect', cause: `the Claude API returned HTTP ${status}`, auth: false };
+        }
+    }
+    return null;
+}
+const DEFAULT_API_MAX_RETRIES = 2;
+let apiRetriesWarned = false;
+/** Test hook: lets the invalid-override warning fire again. */
+export function resetApiRetriesWarningForTests() {
+    apiRetriesWarned = false;
+}
+function resolveApiMaxRetries() {
+    return parseEnvCount(process.env.EPISODIC_MEMORY_API_MAX_RETRIES, { name: 'EPISODIC_MEMORY_API_MAX_RETRIES', fallback: DEFAULT_API_MAX_RETRIES, unit: 'retries' }, message => {
+        if (apiRetriesWarned)
+            return;
+        apiRetriesWarned = true;
+        console.error(message);
+    });
 }
 /**
  * Get API environment overrides for summarization calls.
@@ -119,6 +179,10 @@ export function isAuthFailure(error) {
  * - EPISODIC_MEMORY_API_BASE_URL: Custom API endpoint
  * - EPISODIC_MEMORY_API_TOKEN: Auth token for custom endpoint
  * - EPISODIC_MEMORY_API_TIMEOUT_MS: Timeout for API calls (default: SDK default)
+ * - EPISODIC_MEMORY_API_MAX_RETRIES: Retries the subprocess makes against a failing
+ *   API before it reports the error (default: 2). The subprocess also runs with its
+ *   retry watchdog off: in watchdog mode it retries 429 and 529 past this count for
+ *   minutes to hours with no output, which a caller sees only as a timeout.
  */
 export function getApiEnv() {
     const baseUrl = process.env.EPISODIC_MEMORY_API_BASE_URL;
@@ -138,6 +202,8 @@ export function getApiEnv() {
     return {
         ...process.env,
         EPISODIC_MEMORY_SUMMARIZER_GUARD: '1',
+        CLAUDE_CODE_MAX_RETRIES: String(resolveApiMaxRetries()),
+        CLAUDE_CODE_RETRY_WATCHDOG: '0',
         ...(baseUrl && { ANTHROPIC_BASE_URL: baseUrl }),
         ...(token && { ANTHROPIC_AUTH_TOKEN: token }),
         ...(timeoutMs && { API_TIMEOUT_MS: timeoutMs }),
@@ -382,8 +448,7 @@ async function callClaude(prompt, sessionId, useFallback = false, cwd) {
             console.log(`    ${primaryModel} hit thinking budget error, retrying with ${fallbackModel}`);
             return await callClaude(prompt, sessionId, true, cwd);
         }
-        // If fallback also fails, return error message
-        return result;
+        throw new Error(`Summarizer returned an API error: ${truncateSdkErrorDetail(result)}`);
     }
     return result;
 }
@@ -617,27 +682,41 @@ function getCodexSessionId(exchanges, sessionId) {
 export function getCodexModel(_exchanges) {
     return process.env.EPISODIC_MEMORY_CODEX_MODEL || undefined;
 }
+/** True when a conversation needs no model call: nothing to summarize. */
+export function isTrivialConversation(exchanges) {
+    if (exchanges.length === 0)
+        return true;
+    if (exchanges.length === 1) {
+        return formatConversationText(exchanges).length < 100 || exchanges[0].userMessage.trim() === '/exit';
+    }
+    return false;
+}
 export async function summarizeConversation(exchanges, sessionId) {
-    // Handle trivial conversations
-    if (exchanges.length === 0) {
+    if (isTrivialConversation(exchanges)) {
         return 'Trivial conversation with no substantive content.';
     }
-    if (exchanges.length === 1) {
-        const text = formatConversationText(exchanges);
-        if (text.length < 100 || exchanges[0].userMessage.trim() === '/exit') {
-            return 'Trivial conversation with no substantive content.';
-        }
-    }
     const codexSessionId = getCodexSessionId(exchanges, sessionId);
+    let codexError;
     if (codexSessionId) {
         try {
             const result = await callCodex(buildCodexSummaryPrompt(), codexSessionId, getCodexModel(exchanges));
             return extractSummary(result);
         }
         catch (error) {
+            codexError = error;
             console.log(`  Codex summarizer unavailable, falling back to transcript text: ${error instanceof Error ? error.message : String(error)}`);
         }
     }
+    try {
+        return await summarizeWithClaude(exchanges, sessionId, codexSessionId);
+    }
+    catch (error) {
+        if (codexError !== undefined)
+            throw new CodexFallbackError(codexError, error);
+        throw error;
+    }
+}
+async function summarizeWithClaude(exchanges, sessionId, codexSessionId) {
     // Cost safety (#104): everything below this point calls the metered Claude API
     // path. If a stray global ANTHROPIC_API_KEY would be billed and the user hasn't
     // acknowledged it, warn once and proceed (don't silently spend without notice).
@@ -691,11 +770,12 @@ ${conversationText}`;
             // archive-only ("No conversation found", subtype 'success'; #122), or the
             // subprocess refused to resume and exited nonzero (bg-agent sessions; #146).
             // Any of those → retry once without resume, feeding the transcript as text.
-            // Genuine auth failures are global, not resume-specific, so they fail-fast
-            // (never fall back). A timeout is neither, so it also propagates.
+            // A failure classifySummaryFailure recognises (auth, an overloaded or
+            // rate-limited service, an empty credit balance, a timeout or another 5xx)
+            // is not resume-specific, so it propagates without a second call.
             if (claudeSessionId &&
                 (isResumeFailure(error) || isProcessExitFailure(error)) &&
-                !isAuthFailure(error)) {
+                classifySummaryFailure(error) === null) {
                 console.log(`    resume failed for ${claudeSessionId} (${error.message}); retrying without resume`);
                 const fullPrompt = prompt + '\n\n' + formatConversationText(exchanges);
                 const result = await callClaude(fullPrompt);
@@ -713,6 +793,7 @@ ${conversationText}`;
     console.log(`  Split into ${chunks.length} chunks`);
     // Summarize each chunk
     const chunkSummaries = [];
+    let lastChunkError;
     for (let i = 0; i < chunks.length; i++) {
         const chunkText = formatConversationText(chunks[i]);
         const prompt = `${SUMMARIZER_CONTEXT_MARKER}.
@@ -729,11 +810,15 @@ Example: <summary>Implemented HID keyboard functionality for ESP32. Hit Bluetoot
             console.log(`  Chunk ${i + 1}/${chunks.length}: ${extracted.split(/\s+/).length} words`);
         }
         catch (error) {
+            if (classifySummaryFailure(error) !== null)
+                throw error;
+            lastChunkError = error;
             console.log(`  Chunk ${i + 1} failed, skipping`);
         }
     }
     if (chunkSummaries.length === 0) {
-        return 'Error: Unable to summarize conversation.';
+        const last = lastChunkError instanceof Error ? lastChunkError.message : String(lastChunkError);
+        throw new Error(`Unable to summarize conversation: every chunk failed (last: ${last})`, { cause: lastChunkError });
     }
     // Synthesize chunks into final summary
     const synthesisPrompt = `${SUMMARIZER_CONTEXT_MARKER}.
@@ -756,6 +841,8 @@ Your summary (max 200 words):`;
         return extractSummary(result);
     }
     catch (error) {
+        if (classifySummaryFailure(error) !== null)
+            throw error;
         console.log(`  Synthesis failed, using chunk summaries`);
         return chunkSummaries.join(' ');
     }
