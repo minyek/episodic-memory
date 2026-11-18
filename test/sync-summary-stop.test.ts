@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, utimesSync } from 'fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import type { ConversationExchange } from '../src/types.js';
@@ -238,7 +238,7 @@ describe('a summary batch stops on a global failure and on repeated suspect ones
     expect(result.summarized).toBe(3);
   });
 
-  // the stop writes only to files the walk queued; a real summary,
+  // Invariant 1: the stop writes only to files the walk queued; a real summary,
   // an empty sentinel and an error sentinel still inside the retry interval stay as they are.
   it('leaves a real summary, an empty sentinel and a fresh error sentinel untouched when it stops', async () => {
     conversations([2, 2, 2, 2, 2]);
@@ -258,7 +258,7 @@ describe('a summary batch stops on a global failure and on repeated suspect ones
     expect(result.errors.some(e => e.file.includes(IDS[2]) || e.file.includes(IDS[3]) || e.file.includes(IDS[4]))).toBe(false);
   });
 
-  // the sentinels name the cause and the retry interval, are not
+  // Invariant 4 and AC 3: the sentinels name the cause and the retry interval, are not
   // retried inside the interval, and are retried once it has passed.
   it('names the cause in each sentinel, and retries them only after the retry interval', async () => {
     conversations([2, 2, 2, 2]);
@@ -274,8 +274,13 @@ describe('a summary batch stops on a global failure and on repeated suspect ones
     await run();
     expect(calls()).toBe(0);
 
-    const twoHoursAgo = new Date(Date.now() - 2 * 3600_000);
-    for (let n = 0; n < 4; n++) utimesSync(summaryPath(n), twoHoursAgo, twoHoursAgo);
+    // The stored attempt time, not the file's mtime, decides when a retry is due.
+    const twoHoursAgo = Date.now() - 2 * 3600_000;
+    for (let n = 0; n < 4; n++) {
+      const [marker, state, ...message] = summaryText(n).split('\n');
+      const aged = JSON.stringify({ ...JSON.parse(state), lastAttempt: twoHoursAgo });
+      writeFileSync(summaryPath(n), [marker, aged, ...message].join('\n'), 'utf-8');
+    }
     await run();
     expect(calls()).toBe(4);
     for (let n = 0; n < 4; n++) expect(summaryText(n)).toBe('Did a thing.');
@@ -292,7 +297,7 @@ describe('a summary batch stops on a global failure and on repeated suspect ones
     announced.mockRestore();
   });
 
-  // a failure inside a long conversation's synthesis call propagates; a
+  // AC 7: a failure inside a long conversation's synthesis call propagates; a
   // failure that is the conversation's own still falls back to the chunk summaries.
   it('stops on a global failure in the synthesis call of a long conversation', async () => {
     conversations([16, 2, 2, 2]);
@@ -326,7 +331,7 @@ describe('a summary batch stops on a global failure and on repeated suspect ones
     expect(result.summaryStop).toBe('other');
   });
 
-  // the stop and the suspect count belong to one source directory.
+  // D2: the stop and the suspect count belong to one source directory.
   it('does not carry a stop from one source directory to the next', async () => {
     const src2 = join(dir, 'projects2');
     mkdirSync(join(src2, 'projb'), { recursive: true });
@@ -404,7 +409,7 @@ describe('a Codex conversation whose Claude fallback fails', () => {
   });
 });
 
-// error text is never returned as a summary, whichever path produced it.
+// Invariant 2: error text is never returned as a summary, whichever path produced it.
 describe('the thinking-budget fallback', () => {
   it('fails the conversation instead of returning the API error text as its summary', async () => {
     const budgetError = { type: 'result', subtype: 'success', is_error: false, result: 'API Error: 400 thinking.budget_tokens must be less than max_tokens' };

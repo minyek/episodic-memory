@@ -3,7 +3,7 @@ import path from 'path';
 import { parseConversation } from './parser.js';
 import { initDatabase, getAllExchanges, getFileLastIndexed } from './db.js';
 import { getArchiveDir, getExcludedProjects, findJsonlFiles, statIfExists } from './paths.js';
-import { isErroredSentinel } from './summary-sentinel.js';
+import { isErroredSentinel, isSummaryRetryExhausted, parseErrorSentinel } from './summary-sentinel.js';
 import { shouldSkipConversation } from './sync.js';
 
 export interface VerificationResult {
@@ -64,15 +64,17 @@ export async function verifyIndex(): Promise<VerificationResult> {
 
       const summaryPath = conversationPath.replace('.jsonl', '-summary.txt');
 
-      // Check for missing or errored summary. An error sentinel (#96) means a
-      // previous summarization failed — verify treats it as "missing" so repair
-      // re-attempts it rather than reporting the conversation as healthy.
       if (!fs.existsSync(summaryPath)) {
         result.missing.push({ path: conversationPath, reason: 'No summary file' });
         continue;
       }
-      if (isErroredSentinel(fs.readFileSync(summaryPath, 'utf-8'))) {
-        result.missing.push({ path: conversationPath, reason: 'Previous summarization failed (error sentinel)' });
+      // A failed summary counts as missing so repair re-attempts it, even past the retry limit.
+      const summaryContent = fs.readFileSync(summaryPath, 'utf-8');
+      if (isErroredSentinel(summaryContent)) {
+        const reason = isSummaryRetryExhausted(parseErrorSentinel(summaryContent))
+          ? 'Summary retry limit reached; run episodic-memory-index --repair to retry explicitly'
+          : 'Previous summarization failed (error sentinel)';
+        result.missing.push({ path: conversationPath, reason });
         continue;
       }
 
