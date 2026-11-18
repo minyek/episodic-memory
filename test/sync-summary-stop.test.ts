@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, utimesSync } from 'fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import type { ConversationExchange } from '../src/types.js';
@@ -274,8 +274,13 @@ describe('a summary batch stops on a global failure and on repeated suspect ones
     await run();
     expect(calls()).toBe(0);
 
-    const twoHoursAgo = new Date(Date.now() - 2 * 3600_000);
-    for (let n = 0; n < 4; n++) utimesSync(summaryPath(n), twoHoursAgo, twoHoursAgo);
+    // The stored attempt time, not the file's mtime, decides when a retry is due.
+    const twoHoursAgo = Date.now() - 2 * 3600_000;
+    for (let n = 0; n < 4; n++) {
+      const [marker, state, ...message] = summaryText(n).split('\n');
+      const aged = JSON.stringify({ ...JSON.parse(state), lastAttempt: twoHoursAgo });
+      writeFileSync(summaryPath(n), [marker, aged, ...message].join('\n'), 'utf-8');
+    }
     await run();
     expect(calls()).toBe(4);
     for (let n = 0; n < 4; n++) expect(summaryText(n)).toBe('Did a thing.');

@@ -3,7 +3,7 @@ import path from 'path';
 import { StringDecoder } from 'string_decoder';
 import { SUMMARIZER_CONTEXT_MARKER } from './constants.js';
 import { getExcludedProjects, findJsonlFiles, statIfExists } from './paths.js';
-import { formatErrorSentinel, shouldQueueForSummary } from './summary-sentinel.js';
+import { orderFreshBeforeRetry, recordSummaryFailure, recordSummarySkip, shouldQueueForSummary } from './summary-sentinel.js';
 import { getMaxMessageBytes, isOversizeExchange } from './message-size.js';
 
 const EXCLUSION_MARKERS = [
@@ -206,7 +206,7 @@ export async function syncConversations(
 
   // Collect files to index and summarize
   const filesToIndex: string[] = [];
-  const filesToSummarize: Array<{ path: string; sessionId: string | undefined }> = [];
+  const filesToSummarize: Array<{ path: string; summaryPath: string; sessionId: string | undefined }> = [];
 
   // The index database records each copy the walk makes until its index
   // attempt ends, so a sync stopped part-way leaves the rest for the next sync.
@@ -287,7 +287,8 @@ export async function syncConversations(
 
         // Check if this file needs a summary (whether new, changed or already archived).
         // shouldQueueForSummary skips files that already have a real summary or
-        // an empty zero-exchange sentinel, and retries stale error sentinels (#96).
+        // an empty zero-exchange sentinel, and retries failed attempts after the
+        // retry interval until the attempt limit.
         if (!options.skipSummaries) {
           const summaryPath = destFile.replace('.jsonl', '-summary.txt');
           if (shouldQueueForSummary(summaryPath) && !shouldSkipConversation(destFile)) {
@@ -296,7 +297,7 @@ export async function syncConversations(
             // agent-<hex>.jsonl), queue anyway — summarizeConversation falls
             // back to summarizing from the transcript text.
             const sessionId = extractSessionIdFromPath(destFile) ?? undefined;
-            filesToSummarize.push({ path: destFile, sessionId });
+            filesToSummarize.push({ path: destFile, summaryPath, sessionId });
           }
         }
       } catch (error) {
@@ -411,7 +412,7 @@ export async function syncConversations(
     const { summarizeConversation, classifySummaryFailure, isTrivialConversation } = await import('./summarizer.js');
 
     const summaryLimit = options.summaryLimit ?? 10;
-    const toSummarize = filesToSummarize.slice(0, summaryLimit);
+    const toSummarize = orderFreshBeforeRetry(filesToSummarize).slice(0, summaryLimit);
     const remaining = filesToSummarize.length - toSummarize.length;
 
     console.log(`Generating summaries for ${toSummarize.length} conversation(s)...`);
@@ -430,12 +431,9 @@ export async function syncConversations(
     let suspectInARow = 0;
     const suspectFailuresToStop = 2;
 
-    for (const { path: filePath, sessionId } of toSummarize) {
+    for (const { path: filePath, summaryPath, sessionId } of toSummarize) {
       if (stopMessage !== null) {
-        try {
-          const summaryPath = filePath.replace('.jsonl', '-summary.txt');
-          fs.writeFileSync(summaryPath, formatErrorSentinel(new Error(stopMessage)), 'utf-8');
-        } catch {}
+        recordSummarySkip(summaryPath, new Error(stopMessage));
         result.errors.push({
           file: filePath,
           error: `Summary generation skipped: ${stopMessage}`,
@@ -449,7 +447,6 @@ export async function syncConversations(
 
         if (exchanges.length === 0) {
           // Skip empty conversations — write an empty -summary.txt sentinel so they aren't re-queued forever
-          const summaryPath = filePath.replace('.jsonl', '-summary.txt');
           fs.writeFileSync(summaryPath, '', 'utf-8');
           continue;
         }
@@ -458,25 +455,19 @@ export async function syncConversations(
         const summary = await summarizeConversation(exchanges, sessionId);
         if (!isTrivialConversation(exchanges)) suspectInARow = 0;
 
-        const summaryPath = filePath.replace('.jsonl', '-summary.txt');
         fs.writeFileSync(summaryPath, summary, 'utf-8');
         result.summarized++;
       } catch (error) {
-        // Write a structured error sentinel (#96): distinct from the empty
-        // zero-exchange sentinel so a stale failure can self-heal on the next
-        // sync run past the retry threshold. The marker also keeps the error
-        // text on disk for post-hoc diagnosis. Best-effort — if the sentinel
-        // write itself fails, fall through and surface the original error.
-        try {
-          const summaryPath = filePath.replace('.jsonl', '-summary.txt');
-          fs.writeFileSync(summaryPath, formatErrorSentinel(error), 'utf-8');
-        } catch {}
+        const failure = classifySummaryFailure(error);
+        // A global failure (auth, rate limit, overload, no credit) says nothing
+        // about this conversation, so it keeps the retry count where it was.
+        if (failure?.kind === 'global') recordSummarySkip(summaryPath, error);
+        else recordSummaryFailure(summaryPath, error);
         result.errors.push({
           file: filePath,
           error: `Summary generation failed: ${error instanceof Error ? error.message : String(error)}`
         });
 
-        const failure = classifySummaryFailure(error);
         if (failure === null) {
           suspectInARow = 0;
         } else if (failure.kind === 'suspect') {

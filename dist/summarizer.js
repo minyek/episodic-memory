@@ -124,11 +124,13 @@ export class CodexFallbackError extends Error {
     }
 }
 /**
- * Classifies a summarizer failure for the batch loop in sync. Global failures
- * (auth, an overloaded, rate-limited or unavailable service, an empty credit
- * balance) stop the batch at once. Suspect failures (a timeout, another 5xx)
- * can be one conversation's own, so they stop the batch only when they repeat.
- * Anything else, a 400 included, is that conversation's own.
+ * Classifies a summarizer failure. A global failure (auth, an overloaded,
+ * rate-limited or unavailable service, an empty credit balance) hits every
+ * conversation the same way: it says nothing about the conversation that met
+ * it, so it spends none of that conversation's attempts, and further calls in
+ * the batch would fail too. A suspect failure (a timeout, another 5xx) can be
+ * one conversation's own: it spends an attempt, and only a repeat shows the
+ * service failing. Anything else, a 400 included, is that conversation's own.
  */
 export function classifySummaryFailure(error) {
     if (error instanceof CodexFallbackError)
