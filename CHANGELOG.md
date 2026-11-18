@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.3] - 2026-11-18
+
+Fork release: a long outage of the Claude API no longer uses up conversations' summary attempts.
+
+### Fixed
+
+- When the Claude API cannot be reached (no network, a proxy or DNS failure, a TLS problem), summarizing no longer counts it against each conversation's five attempts. Before, five hourly syncs during an outage left valid conversations unsummarized until `index --repair`. Now the sync batch stops at once, names the cause, and tries again after the retry interval, the same as for a rate limit or an expired login.
+
 ## [1.6.2] - 2026-11-18
 
 Fork release: a conversation that cannot be summarized no longer retries forever, and index commands honor the `DO NOT INDEX` marker.
