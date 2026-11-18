@@ -282,6 +282,12 @@ export EPISODIC_MEMORY_MAX_MESSAGE_BYTES=262144
 # summarization or block later syncs on the lock.
 export EPISODIC_MEMORY_SUMMARY_TIMEOUT_MS=120000
 
+# Minimum time between automatic summary attempts after an error (hours).
+export EPISODIC_MEMORY_SUMMARY_ERROR_RETRY_HOURS=1
+
+# Failed attempts per conversation before automatic summarization stops.
+export EPISODIC_MEMORY_SUMMARY_MAX_ATTEMPTS=5
+
 # Acknowledge that summarization may bill a metered Anthropic API. If
 # ANTHROPIC_API_KEY is set (and no EPISODIC_MEMORY_API_BASE_URL/TOKEN is), the
 # summarizer bills the metered API instead of your Claude subscription and prints
@@ -293,6 +299,20 @@ export EPISODIC_MEMORY_ALLOW_METERED_API=1
 
 Only the exact value `1` silences the metered-API warning; any other value still shows it.
 `EPISODIC_MEMORY_ALLOW_METERED_API` is likewise `1`-only, as is `EPISODIC_MEMORY_DISABLE_AUTO_SYNC`.
+
+Summary retries wait one hour by default and stop after five failed attempts per
+conversation. Set a positive number of hours and a positive integer attempt
+limit to override these defaults; invalid values use the defaults. Fresh work
+is processed before retries. A failure that hits every conversation the same way
+(a failed login, a rate-limited or overloaded API, an empty credit balance), and
+the conversations a stopped batch skips, retry later without spending the attempt
+limit. Any other failure, a timeout included, spends one attempt.
+
+Run `episodic-memory-index --verify` to identify exhausted summaries. After fixing
+the underlying problem, `episodic-memory-index --repair` explicitly retries failed
+summaries, including exhausted ones, and repairs other reported index issues.
+Successful repair clears the failure state. A conversation whose summary stops
+retrying stays indexed and searchable.
 
 ### Routing through AWS Bedrock
 
