@@ -304,7 +304,7 @@ Summary retries wait one hour by default and stop after five failed attempts per
 conversation. Set a positive number of hours and a positive integer attempt
 limit to override these defaults; invalid values use the defaults. Fresh work
 is processed before retries. A failure that hits every conversation the same way
-(a failed login, a rate-limited or overloaded API, an empty credit balance), and
+(a failed login, an unreachable, rate-limited or overloaded API, an empty credit balance), and
 the conversations a stopped batch skips, retry later without spending the attempt
 limit. Any other failure, a timeout included, spends one attempt.
 
@@ -351,7 +351,7 @@ Codex summarization requires `codex-cli 0.130.0` or newer. If Codex app-server s
 
 Summaries are display-only: they decorate search results and are never embedded or searched, so `EPISODIC_MEMORY_SKIP_SUMMARIES=1` costs you that line of context and nothing else.
 
-A sync's summary batch (one per source directory) stops at the first sign that the rest will fail the same way: an expired or missing login, an overloaded, rate-limited or unavailable API (HTTP 429, 503 or 529), or an empty credit balance. It also stops at the second consecutive timeout or other 5xx error. The conversations not tried get an error marker naming the cause and are tried again after `EPISODIC_MEMORY_SUMMARY_ERROR_RETRY_HOURS` (default 1 hour).
+A sync's summary batch (one per source directory) stops at the first sign that the rest will fail the same way: an expired or missing login, an API that cannot be reached, an overloaded, rate-limited or unavailable API (HTTP 429, 503 or 529), or an empty credit balance. It also stops at the second consecutive timeout or other 5xx error. The conversations not tried get an error marker naming the cause and are tried again after `EPISODIC_MEMORY_SUMMARY_ERROR_RETRY_HOURS` (default 1 hour).
 
 ## Commands
 

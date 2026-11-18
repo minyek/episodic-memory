@@ -69,8 +69,8 @@ export interface SummaryFailureClass {
     auth: boolean;
 }
 /**
- * Classifies a summarizer failure. A global failure (auth, an overloaded,
- * rate-limited or unavailable service, an empty credit balance) hits every
+ * Classifies a summarizer failure. A global failure (auth, an unreachable,
+ * overloaded, rate-limited or unavailable service, an empty credit balance) hits every
  * conversation the same way: it says nothing about the conversation that met
  * it, so it spends none of that conversation's attempts, and further calls in
  * the batch would fail too. A suspect failure (a timeout, another 5xx) can be

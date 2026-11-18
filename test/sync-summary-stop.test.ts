@@ -21,6 +21,7 @@ type Step =
 const ok: Step = { kind: 'ok' };
 const api = (status: number, text = `API Error: ${status}`): Step => ({ kind: 'api', status, text });
 const notLoggedIn: Step = { kind: 'api', status: null, text: 'Not logged in · Please run /login' };
+const unreachable: Step = { kind: 'api', status: null, text: 'API Error: Unable to connect to API (ConnectionRefused)' };
 const creditLow: Step = { kind: 'api', status: 400, text: 'Your credit balance is too low to access the Anthropic API.' };
 const hang: Step = { kind: 'hang' };
 
@@ -111,6 +112,17 @@ describe('a summary batch stops on a global failure and on repeated suspect ones
   it('stops at once on a credit-balance 400, without a second call for the resume fallback', async () => {
     conversations([2, 2, 2, 2]);
     script([creditLow]);
+
+    const result = await run();
+
+    expect(calls()).toBe(1);
+    expect(result.errors.filter(e => e.error.startsWith('Summary generation skipped:'))).toHaveLength(3);
+    expect(result.summaryStop).toBe('other');
+  });
+
+  it('stops at once when the API cannot be reached', async () => {
+    conversations([2, 2, 2, 2]);
+    script([unreachable]);
 
     const result = await run();
 
