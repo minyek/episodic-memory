@@ -165,6 +165,7 @@ describe('summary retry lifecycle through callers', () => {
   const failureClasses = [
     { failure: 'an expired login', error: () => new Error('Failed to authenticate. API Error: 401'), attempts: 0 },
     { failure: 'an overloaded API', error: () => new SummarizerSdkError('success', undefined, 529, 'API Error: 529 overloaded'), attempts: 0 },
+    { failure: 'an unreachable API', error: () => new SummarizerSdkError('success', undefined, null, 'API Error: Unable to connect to API (ConnectionRefused)'), attempts: 0 },
     { failure: 'a timeout', error: () => new SummarizerTimeoutError(50), attempts: 1 },
     { failure: 'a failure of its own', error: () => new Error('Transcript exceeds capacity'), attempts: 1 },
   ];

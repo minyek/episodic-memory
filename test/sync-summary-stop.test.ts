@@ -11,7 +11,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({ query: vi.fn() }));
 
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { syncConversations, shouldHintApiConfiguration } from '../src/sync.js';
-import { summarizeConversation, classifySummaryFailure } from '../src/summarizer.js';
+import { summarizeConversation, classifySummaryFailure, SummarizerSdkError } from '../src/summarizer.js';
 
 type Step =
   | { kind: 'ok' }
@@ -21,6 +21,7 @@ type Step =
 const ok: Step = { kind: 'ok' };
 const api = (status: number, text = `API Error: ${status}`): Step => ({ kind: 'api', status, text });
 const notLoggedIn: Step = { kind: 'api', status: null, text: 'Not logged in · Please run /login' };
+const unreachable: Step = { kind: 'api', status: null, text: 'API Error: Unable to connect to API (ConnectionRefused)' };
 const creditLow: Step = { kind: 'api', status: 400, text: 'Your credit balance is too low to access the Anthropic API.' };
 const hang: Step = { kind: 'hang' };
 
@@ -111,6 +112,17 @@ describe('a summary batch stops on a global failure and on repeated suspect ones
   it('stops at once on a credit-balance 400, without a second call for the resume fallback', async () => {
     conversations([2, 2, 2, 2]);
     script([creditLow]);
+
+    const result = await run();
+
+    expect(calls()).toBe(1);
+    expect(result.errors.filter(e => e.error.startsWith('Summary generation skipped:'))).toHaveLength(3);
+    expect(result.summaryStop).toBe('other');
+  });
+
+  it('stops at once when the API cannot be reached', async () => {
+    conversations([2, 2, 2, 2]);
+    script([unreachable]);
 
     const result = await run();
 
@@ -434,5 +446,18 @@ describe('shouldHintApiConfiguration', () => {
   it('does not hint when some summary succeeded or none failed', () => {
     expect(shouldHintApiConfiguration({ summaryFailures: 3, summarized: 1, stoppedOnNonAuthCause: false })).toBe(false);
     expect(shouldHintApiConfiguration({ summaryFailures: 0, summarized: 0, stoppedOnNonAuthCause: false })).toBe(false);
+  });
+});
+
+// Behaviour: the CLI also reports an API it cannot reach without a connection
+// code, and as a TLS failure; each fails every conversation the same way, so
+// each is a global failure, not a login problem.
+describe('classifySummaryFailure for the other forms of an API that cannot be reached', () => {
+  it.each([
+    'API Error: Unable to connect to API. Check your internet connection',
+    'API Error: Unable to connect to API: SSL certificate verification failed. Check your proxy or corporate SSL certificates',
+  ])('classifies %s as a global failure', text => {
+    expect(classifySummaryFailure(new SummarizerSdkError('success', undefined, null, text)))
+      .toMatchObject({ kind: 'global', auth: false });
   });
 });
