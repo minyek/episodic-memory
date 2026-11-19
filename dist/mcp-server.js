@@ -31870,7 +31870,7 @@ function formatCursorConversationAsMarkdown(lines) {
 }
 
 // src/version.ts
-var VERSION = "1.6.0";
+var VERSION = "1.6.1";
 
 // src/mcp-server.ts
 import fs4 from "fs";

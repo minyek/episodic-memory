@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1] - 2026-11-17
+
+Fork release: 1.6.0 plus upstream fixes since then, the background-sync CPU bound and the summarizer overload fix.
+
+### Fixed
+
+- A background sync can no longer take over your CPU. Embedding used one worker per core with idle workers spinning, and a sync had no deadline, so a handful of overlapping syncs could hold most of a many-core machine for hours (13 syncs used about 22 of 32 cores for up to 7 hours in one report). Embedding is now capped at 2 threads on every platform with spin-waiting off (`EPISODIC_MEMORY_EMBED_THREADS` to change; 0 restores the onnxruntime default). The detached background sync runs at nice 10, takes one per-user lock that holds across different `HOME` and temp directories, and stops after 30 minutes (`EPISODIC_MEMORY_SYNC_TIMEOUT_MS`), exiting with code 124. A stopped sync loses no conversation: archived files are recorded and the next sync indexes them. Foreground `sync` and `index` are unchanged.
+- Summaries no longer report an overloaded API as a 120-second timeout. The summarizer's Claude subprocess inherited `CLAUDE_CODE_MAX_RETRIES` and the retry watchdog from a parent agent session, so a 429 or 529 was retried for minutes with no output. It now runs with 2 retries (`EPISODIC_MEMORY_API_MAX_RETRIES` to change) and the watchdog off, and an HTTP error comes back in seconds. A sync's summary batch stops at the first login failure, HTTP 429/503/529 or spent credit balance, and after two timeouts in a row; conversations not yet tried are retried after the usual interval. A long conversation whose every chunk failed is now an error instead of the summary text "Error: Unable to summarize conversation.", and `index --repair` indexes a conversation even when its summary fails.
+
 ## [1.6.0] - 2026-09-08
 
 Adds a fifth conversation source, an off switch for automatic syncing, and two fixes for real-world resource problems.
