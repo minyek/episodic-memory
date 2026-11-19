@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.2] - 2026-11-18
+
+Fork release: a conversation that cannot be summarized no longer retries forever, and index commands honor the `DO NOT INDEX` marker.
+
+### Fixed
+
+- A conversation whose summary keeps failing is now tried at most five times, at least an hour apart, and then left alone (both limits are configurable). Before, it was retried every hour, for ever. Sync tries new conversations before retries. A failed login, a rate-limited or overloaded API, or an empty credit balance hits every conversation the same way, so it does not use up any conversation's attempts, in sync or in the `index` commands. `index --verify` lists conversations that ran out of attempts and prints the command to recover them; `index --repair` tries them again.
+- `index`, `index --cleanup`, `index --session`, `index --rebuild` and `index --repair` now skip conversations that carry the `DO NOT INDEX` marker, as the README promises. `index --cleanup` also copies archive files through a temporary file, so a crash mid-copy cannot leave a truncated archive file.
+
 ## [1.6.1] - 2026-11-17
 
 Fork release: 1.6.0 plus upstream fixes since then, the background-sync CPU bound and the summarizer overload fix.
