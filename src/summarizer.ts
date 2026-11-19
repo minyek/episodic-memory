@@ -143,8 +143,8 @@ export interface SummaryFailureClass {
 }
 
 /**
- * Classifies a summarizer failure. A global failure (auth, an overloaded,
- * rate-limited or unavailable service, an empty credit balance) hits every
+ * Classifies a summarizer failure. A global failure (auth, an unreachable,
+ * overloaded, rate-limited or unavailable service, an empty credit balance) hits every
  * conversation the same way: it says nothing about the conversation that met
  * it, so it spends none of that conversation's attempts, and further calls in
  * the batch would fail too. A suspect failure (a timeout, another 5xx) can be
@@ -161,6 +161,9 @@ export function classifySummaryFailure(error: unknown): SummaryFailureClass | nu
   }
   if (error instanceof SummarizerSdkError) {
     const status = error.apiErrorStatus;
+    if (/unable to connect to api/i.test(`${error.detail ?? ''} ${error.message}`)) {
+      return { kind: 'global', cause: 'the Claude API cannot be reached (check the network, a proxy or EPISODIC_MEMORY_API_BASE_URL)', auth: false };
+    }
     if (status === 429) return { kind: 'global', cause: 'the Claude API is rate limiting requests (HTTP 429)', auth: false };
     if (status === 503 || status === 529) {
       return { kind: 'global', cause: `the Claude API is overloaded or unavailable (HTTP ${status})`, auth: false };
@@ -881,8 +884,8 @@ ${conversationText}`;
       // archive-only ("No conversation found", subtype 'success'; #122), or the
       // subprocess refused to resume and exited nonzero (bg-agent sessions; #146).
       // Any of those → retry once without resume, feeding the transcript as text.
-      // A failure classifySummaryFailure recognises (auth, an overloaded or
-      // rate-limited service, an empty credit balance, a timeout or another 5xx)
+      // A failure classifySummaryFailure recognises (auth, an unreachable,
+      // overloaded or rate-limited service, an empty credit balance, a timeout or another 5xx)
       // is not resume-specific, so it propagates without a second call.
       if (
         claudeSessionId &&

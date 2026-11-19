@@ -375,8 +375,8 @@ export async function syncConversations(sourceDir, destDir, options = {}) {
         if (remaining > 0) {
             console.log(`  (${remaining} more need summaries - will process on next sync)`);
         }
-        // A global failure (an expired or missing Claude CLI login, an overloaded or
-        // rate-limited service, an empty credit balance) hits every conversation the
+        // A global failure (an expired or missing Claude CLI login, an unreachable,
+        // overloaded or rate-limited service, an empty credit balance) hits every conversation the
         // same way, so the rest of this source's batch is not tried: its files get an
         // error sentinel naming the cause and retry after the retry interval
         // (EPISODIC_MEMORY_SUMMARY_ERROR_RETRY_HOURS, default 1 h). A suspect failure
@@ -411,7 +411,7 @@ export async function syncConversations(sourceDir, destDir, options = {}) {
             }
             catch (error) {
                 const failure = classifySummaryFailure(error);
-                // A global failure (auth, rate limit, overload, no credit) says nothing
+                // A global failure (auth, unreachable API, rate limit, overload, no credit) says nothing
                 // about this conversation, so it keeps the retry count where it was.
                 if (failure?.kind === 'global')
                     recordSummarySkip(summaryPath, error);
