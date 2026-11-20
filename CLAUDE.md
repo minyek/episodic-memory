@@ -8,14 +8,16 @@ This repository is a fork of `obra/episodic-memory`. The `fork-upstream-pr-workf
 
 - **Remotes.** `upstream` is obra (`https://github.com/obra/episodic-memory.git`; its push URL is set to `DISABLED`), `origin` is the fork (`minyek/episodic-memory`). `main` tracks `origin/main` and is upstream plus the fork's commits, linear. `gh repo set-default` is `minyek/episodic-memory`.
 - **Pull requests.** Upstream accepts them (others' are merged; the fork's #109 is open). A fix is a `fix/<slug>` branch from `upstream/main`. Drafts live next to the repository as `~/projects/episodic-memory-*-pr.md`; the stack index, when a branch stacks on another, is `~/projects/episodic-memory-pr-stack.md` (none exists yet). Posting, editing or commenting on an upstream PR needs the user's go-ahead, and a PR names `--repo obra/episodic-memory`.
-- **Fork-only paths** (their own commits, never on a fix branch): `package-lock.json` (obra has none), `docs/archive/`, `docs/plans/`, `docs/reports/` and `docs/requirements/` (obra owns `docs/CODEX.md`, `docs/OPENCODE.md`, `docs/SCHEMA.md` and `docs/superpowers/`), release commits titled `chore(release): vX.Y.Z (fork)`, and whole-bundle `dist/` rebuilds such as `82dd8b5`. A fix's own `dist/` output goes in the fix's commit.
+- **Fork-only paths** (their own commits, never on a fix branch): `package-lock.json` (obra has none) and the `.gitignore` line that stopped ignoring it (`8987a58`), `docs/archive/`, `docs/plans/`, `docs/reports/` and `docs/requirements/` (obra owns `docs/CODEX.md`, `docs/OPENCODE.md`, `docs/SCHEMA.md` and `docs/superpowers/`), this `## This fork` section of `CLAUDE.md`, release commits titled `chore(release): vX.Y.Z (fork)`, and whole-bundle `dist/` rebuilds such as `82dd8b5`. A fix's own `dist/` output goes in the fix's commit.
 - **Gate.** `npm test` and `npm run build`, with `dist/` fresh (see Build and test).
 - **Install after a change lands.** The `episodic-memory-dev` marketplace installs from `minyek/episodic-memory`, and the plugin cache is keyed by version (`~/.claude/plugins/cache/episodic-memory-dev/episodic-memory/<version>`), so a change reaches the plugin through a release: a `chore(release): vX.Y.Z (fork)` commit pushed to `origin` with its tag. Then the user runs `/plugin marketplace update episodic-memory-dev` and `/plugin update episodic-memory@episodic-memory-dev` and restarts.
 - **Release engineering** runs as below with these changes: the commit is `chore(release): vX.Y.Z (fork)`; step 5 pushes `main` and the tag to `origin`; step 6 is `gh release create ... --repo minyek/episodic-memory`; step 7 (`obra/superpowers-marketplace`) is upstream's and is not run.
 
 ### Syncing from upstream
 
-`/sync-upstream` rebases `main` onto `upstream/main`; no merge commit from upstream. A version field in a replayed commit takes upstream's value, and one release commit on top sets the fork's version above both. Rebuild `dist/` from the worktree's own `npm install` (never a symlinked `node_modules`) and run the gate. At 2026-11-19 the fork was 0 commits behind.
+`/sync-upstream` rebases `main` onto `upstream/main`; no merge commit from upstream. A version field in a replayed commit takes upstream's value, and one release commit on top sets the fork's version above both. Rebuild `dist/` from the worktree's own `npm install` (never a symlinked `node_modules`) and run the gate.
+
+Sync only with `/sync-upstream`: GitHub's "Sync fork" button merges upstream into `main` or discards the fork's commits, and `gh repo sync --force` resets `main` to upstream.
 
 ## Quick orientation
 
